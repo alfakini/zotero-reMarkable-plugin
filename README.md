@@ -146,10 +146,30 @@ projects.
 
 ## Limitations
 
-- Rotated PDF pages (`/Rotate`) are not yet handled when mapping coordinates.
-- Highlighter strokes drawn freehand become area highlights without text.
+- **One machine.** Sync state lives in the Zotero data directory
+  (`remarkable-sync/state.json`). Syncing the same library from two computers
+  duplicates documents and annotations.
+- **Unofficial protocol.** The reMarkable cloud sync protocol and the `.rm` format are
+  reverse-engineered and can break with a firmware or cloud change. The `.rm` text
+  writer is only tested against its own reader. A paired tablet and the cloud are
+  required; there is no USB or local sync.
+- **Zotero annotations go one way.** They are burned into the uploaded PDF and cannot be
+  edited on the tablet. Annotations imported from the tablet are never pushed back.
+- **Standalone PDFs** (attachments without a parent item) are synced, but margin notes
+  and notebook pages on them are skipped, because Zotero only allows child notes
+  under a regular item.
+- **Note formatting** is limited to headings, bullet lists and plain text. Images and
+  other rich formatting in Zotero notes are not shown on the tablet.
+- **Coordinates** are mapped at a fixed 226 dpi. Rotated (`/Rotate`), landscape and
+  non-Letter/A4 pages are untested.
+- **Large PDFs** are rebuilt on Zotero's main thread, so Zotero can freeze for a while
+  (the plugin warns for files of 50 MB or more).
+- Freehand highlighter strokes become area highlights without text.
 - Images and stickers placed on pages (newer firmware) are ignored.
 - EPUBs are not supported, only PDFs.
+- Documents moved to the tablet's trash are still synced until they are emptied from
+  the trash.
+- Group libraries are untested.
 
 ## Credits
 
