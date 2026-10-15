@@ -205,6 +205,88 @@ test("a state file with an unexpected layout counts as corrupt", async () => {
   await assert.rejects(() => new SyncStateStore(PATH, io).load(), /unreadable/);
 });
 
+function withImports(key: string, ...zoteroKeys: string[]): DocState {
+  return {
+    ...doc(key),
+    imported: Object.fromEntries(
+      zoteroKeys.map((k) => [
+        `p1/${k}`,
+        { zoteroKey: k, hash: "h", kind: "annotation" as const },
+      ]),
+    ),
+  };
+}
+
+test("forgetting a document keeps its imported keys in the registry", () => {
+  const store = new SyncStateStore(PATH, memoryIO());
+  store.set({
+    ...withImports("AAAA", "ANNOA", "ANNOB"),
+    detachedImported: ["OLD1"],
+  });
+  store.forget(1, "AAAA");
+  assert.equal(store.get(1, "AAAA"), undefined);
+  assert.deepEqual(store.getDetached(1, "AAAA").sort(), [
+    "ANNOA",
+    "ANNOB",
+    "OLD1",
+  ]);
+  assert.deepEqual(store.getDetached(1, "OTHER"), []);
+  assert.deepEqual(store.getDetached(2, "AAAA"), []);
+});
+
+test("forget of an unknown document is a no-op", () => {
+  const store = new SyncStateStore(PATH, memoryIO());
+  store.forget(1, "NOPE");
+  assert.deepEqual(store.getDetached(1, "NOPE"), []);
+});
+
+test("the registry survives save/load and repeated forgets accumulate", async () => {
+  const io = memoryIO();
+  const a = new SyncStateStore(PATH, io);
+  await a.load();
+  a.set(withImports("AAAA", "ANNOA"));
+  a.forget(1, "AAAA");
+  a.set(withImports("AAAA", "ANNOB"));
+  a.forget(1, "AAAA");
+  await a.save();
+  const b = new SyncStateStore(PATH, io);
+  await b.load();
+  assert.deepEqual(b.getDetached(1, "AAAA").sort(), ["ANNOA", "ANNOB"]);
+});
+
+test("state files without a registry load, and tolerate a malformed one", async () => {
+  const io = memoryIO(
+    new Map([
+      [
+        PATH,
+        JSON.stringify({ version: 1, docs: {}, detached: { "1/A": "bad" } }),
+      ],
+    ]),
+  );
+  const s = new SyncStateStore(PATH, io);
+  await s.load();
+  assert.deepEqual(s.getDetached(1, "A"), []);
+  const old = new SyncStateStore(
+    PATH,
+    memoryIO(new Map([[PATH, JSON.stringify({ version: 1, docs: {} })]])),
+  );
+  await old.load();
+  assert.deepEqual(old.getDetached(1, "A"), []);
+});
+
+test("removeDetached drops erased keys and prunes empty entries", async () => {
+  const io = memoryIO();
+  const s = new SyncStateStore(PATH, io);
+  await s.load();
+  s.addDetached(1, "AAAA", ["K1", "K2"]);
+  s.removeDetached(1, "AAAA", ["K1", "UNKNOWN"]);
+  assert.deepEqual(s.getDetached(1, "AAAA"), ["K2"]);
+  s.removeDetached(1, "AAAA", ["K2"]);
+  assert.deepEqual(s.getDetached(1, "AAAA"), []);
+  await s.save();
+  assert.equal("detached" in JSON.parse(io.files.get(PATH)!), false);
+});
+
 test("concurrent loads share one read and do not clobber later changes", async () => {
   const io = memoryIO(
     new Map([[PATH, JSON.stringify({ version: 1, docs: {} })]]),

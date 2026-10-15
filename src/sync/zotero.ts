@@ -14,6 +14,7 @@ import {
   wrapNoteHtml,
 } from "./notes";
 import type { RmParagraph } from "../remarkable/rmscene";
+import { skipKeys } from "./detached";
 import type { DocState } from "./state";
 import type { ZAnnotation, ZNote } from "./types";
 
@@ -53,16 +54,14 @@ export function remarkableTitle(attachment: Zotero.Item): string {
   return name.replace(/[\\/:*?"<>|]/g, "-").slice(0, 120);
 }
 
-function importedKeys(doc?: DocState) {
-  return new Set(Object.values(doc?.imported ?? {}).map((r) => r.zoteroKey));
-}
-
 /** Zotero-made annotations (excludes those imported from the tablet). */
 export function zoteroAnnotations(
   attachment: Zotero.Item,
   doc?: DocState,
+  /** Keys detached from forgotten documents (SyncStateStore.getDetached). */
+  detached: Iterable<string> = [],
 ): ZAnnotation[] {
-  const skip = importedKeys(doc);
+  const skip = skipKeys(doc, detached);
   return attachment
     .getAnnotations()
     .filter((a) => !skip.has(a.key))
@@ -91,10 +90,15 @@ export function zoteroAnnotations(
 }
 
 /** Child notes of the parent item (excluding notes this plugin created). */
-export function zoteroNotes(attachment: Zotero.Item, doc?: DocState): ZNote[] {
+export function zoteroNotes(
+  attachment: Zotero.Item,
+  doc?: DocState,
+  /** Keys detached from forgotten documents (SyncStateStore.getDetached). */
+  detached: Iterable<string> = [],
+): ZNote[] {
   const parent = attachment.parentItem;
   if (!parent) return [];
-  const skip = importedKeys(doc);
+  const skip = skipKeys(doc, detached);
   for (const rec of Object.values(doc?.notePages ?? {})) skip.add(rec.noteKey);
   return (
     Zotero.Items.get(parent.getNotes())

@@ -26,6 +26,7 @@ import {
   notesFingerprint,
   syncNotes,
 } from "./noteSync";
+import { buildDetachedList, clearErased } from "./detached";
 import { buildRemarkablePdf } from "./pdfExport";
 import {
   canSaveCandidate,
@@ -133,8 +134,10 @@ export class SyncEngine {
         let doc = this.state.get(att.libraryID, att.key);
         const entry = doc ? rootEntries.get(doc.rmDocId) : undefined;
         if (doc && !entry) {
-          // Deleted on the tablet: forget it; it is re-uploaded below.
-          this.state.delete(att.libraryID, att.key);
+          // Deleted on the tablet: forget it; it is re-uploaded below. The
+          // imported objects stay in Zotero: record them as detached so they
+          // are not burned into the re-uploaded PDF.
+          this.state.forget(att.libraryID, att.key);
           doc = undefined;
         }
         // Must run before pull(), which would otherwise erase notes that
@@ -191,8 +194,11 @@ export class SyncEngine {
   ) {
     const path = await att.getFilePathAsync();
     if (!path) throw new Error("PDF file is missing");
-    const annotations = zoteroAnnotations(att, doc);
-    const notes = this.settings().appendNotesPages ? zoteroNotes(att, doc) : [];
+    const detached = this.state.getDetached(att.libraryID, att.key);
+    const annotations = zoteroAnnotations(att, doc, detached);
+    const notes = this.settings().appendNotesPages
+      ? zoteroNotes(att, doc, detached)
+      : [];
     const stat = await IOUtils.stat(path);
     const print = fingerprint({
       annotations,
@@ -222,7 +228,18 @@ export class SyncEngine {
       doc.rmDocHash = nextRmDocHash(doc.rmDocHash, replaced);
       report.updated++;
     } else {
-      if (doc) await this.cloud.trashDocument(doc.rmDocId);
+      // A different page count means a new tablet document. What was imported
+      // from the old one stays in Zotero but is detached from tracking, so it
+      // is neither erased by a pull nor burned into the new PDF.
+      const detachedImported = buildDetachedList(doc);
+      if (doc) {
+        await this.cloud.trashDocument(doc.rmDocId);
+        Zotero.debug(
+          `[reMarkable] PDF page count changed for ${att.key} ` +
+            `(${doc.originalPageCount} -> ${built.originalPageCount}): ` +
+            `uploading a new document, detaching ${detachedImported.length} imported object(s)`,
+        );
+      }
       const rmDocId = await this.cloud.uploadPdf(
         remarkableTitle(att),
         built.bytes,
@@ -237,6 +254,9 @@ export class SyncEngine {
         appendedPageCount: built.appendedPageCount,
         pageBoxes: built.pageBoxes,
         imported: {},
+        detachedImported: detachedImported.length
+          ? detachedImported
+          : undefined,
       };
       report.uploaded++;
       doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
@@ -375,7 +395,9 @@ export class SyncEngine {
     const doc = this.state.get(att.libraryID, att.key);
     if (!doc) return false;
     await this.cloud.trashDocument(doc.rmDocId);
-    this.state.delete(att.libraryID, att.key);
+    // What was imported stays in Zotero and must not be taken for the user's
+    // own work if the item is synced again.
+    this.state.forget(att.libraryID, att.key);
     await this.state.save();
     return true;
   }
@@ -390,16 +412,20 @@ export class SyncEngine {
     let n = 0;
     for (const att of atts) {
       const doc = this.state.get(att.libraryID, att.key);
-      if (!doc) continue;
-      for (const rec of Object.values(doc.imported)) {
-        if (existsByKey(att.libraryID, rec.zoteroKey)) n++;
-        await eraseByKey(att.libraryID, rec.zoteroKey);
+      const registry = this.state.getDetached(att.libraryID, att.key);
+      // Only what the plugin created: imported, detached from a replaced
+      // document, or detached from a forgotten one.
+      const keys = buildDetachedList(doc, registry);
+      for (const key of keys) {
+        if (existsByKey(att.libraryID, key)) n++;
+        await eraseByKey(att.libraryID, key);
       }
-      if (reimport) {
-        doc.imported = {};
-        doc.rmDocHash = undefined;
+      this.state.removeDetached(att.libraryID, att.key, keys);
+      if (doc) {
+        clearErased(doc, reimport);
+        if (reimport) doc.rmDocHash = undefined;
+        this.state.set(doc);
       }
-      this.state.set(doc);
     }
     await this.state.save();
     return n;
