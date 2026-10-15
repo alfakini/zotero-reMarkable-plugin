@@ -145,6 +145,20 @@ export async function registerDevice(
   return text.trim();
 }
 
+/**
+ * Pair and only keep the device token once it has been validated, so a token
+ * that does not work is never stored (and the UI never shows as connected).
+ */
+export async function pairDevice(steps: {
+  register: () => Promise<string>;
+  validate: (token: string) => Promise<unknown>;
+  store: (token: string) => void;
+}): Promise<void> {
+  const token = await steps.register();
+  await steps.validate(token);
+  steps.store(token);
+}
+
 export class RemarkableCloud {
   private fetch: FetchFn;
   private userToken?: string;

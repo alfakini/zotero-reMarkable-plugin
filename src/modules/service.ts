@@ -1,5 +1,9 @@
 /** Glue between Zotero UI and the sync engine. */
-import { RemarkableCloud, registerDevice } from "../remarkable/cloud";
+import {
+  pairDevice,
+  RemarkableCloud,
+  registerDevice,
+} from "../remarkable/cloud";
 import { uuid4 } from "../remarkable/hash";
 import { SyncEngine, type SyncReport } from "../sync/engine";
 import { SyncStateStore } from "../sync/state";
@@ -52,18 +56,20 @@ export class RemarkableService {
 
   /** Pair with the reMarkable cloud using a one-time code. */
   async connect(code: string) {
-    const token = await registerDevice(
-      fetch.bind(globalThis),
-      code,
-      this.deviceId(),
-    );
-    setPref("deviceToken", token);
-    this.engine = undefined;
-    // Validate right away so a bad token surfaces in the preferences.
-    await new RemarkableCloud({
-      fetch: fetch.bind(globalThis),
-      deviceToken: token,
-    }).refreshUserToken();
+    const deviceId = this.deviceId();
+    await pairDevice({
+      register: () => registerDevice(fetch.bind(globalThis), code, deviceId),
+      // Validate before storing so a bad token never reaches the preferences.
+      validate: (token) =>
+        new RemarkableCloud({
+          fetch: fetch.bind(globalThis),
+          deviceToken: token,
+        }).refreshUserToken(),
+      store: (token) => {
+        setPref("deviceToken", token);
+        this.engine = undefined;
+      },
+    });
   }
 
   disconnect() {

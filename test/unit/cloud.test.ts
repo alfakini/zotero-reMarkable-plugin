@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   type IndexEntry,
+  pairDevice,
   parseIndex,
   isTabletChangedError,
   RemarkableCloud,
@@ -594,6 +595,54 @@ test("listItems still propagates auth errors", async () => {
     () => cloud.listItems(),
     (e: unknown) => e instanceof RemarkableError && e.status === 401,
   );
+});
+
+test("pairDevice stores the token only after validation succeeds", async () => {
+  const calls: string[] = [];
+  await pairDevice({
+    register: async () => "tok",
+    validate: async (t) => {
+      calls.push(`validate:${t}`);
+    },
+    store: (t) => calls.push(`store:${t}`),
+  });
+  assert.deepEqual(calls, ["validate:tok", "store:tok"]);
+});
+
+test("pairDevice does not store a token that fails validation", async () => {
+  let stored = false;
+  await assert.rejects(
+    pairDevice({
+      register: async () => "bad",
+      validate: async () => {
+        throw new RemarkableError("nope", 401);
+      },
+      store: () => {
+        stored = true;
+      },
+    }),
+    /nope/,
+  );
+  assert.equal(stored, false);
+});
+
+test("pairDevice does not validate or store when registration fails", async () => {
+  let touched = false;
+  await assert.rejects(
+    pairDevice({
+      register: async () => {
+        throw new Error("bad code");
+      },
+      validate: async () => {
+        touched = true;
+      },
+      store: () => {
+        touched = true;
+      },
+    }),
+    /bad code/,
+  );
+  assert.equal(touched, false);
 });
 
 test("getPageIds shows whether an updateDocument whose response was lost landed", async () => {
