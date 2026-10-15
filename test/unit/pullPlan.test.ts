@@ -5,6 +5,7 @@ import {
   formatCandidateFailures,
   keysToErase,
   needsPull,
+  newUploadedDoc,
   nextRmDocHash,
   readPages,
 } from "../../src/sync/pullPlan";
@@ -82,6 +83,27 @@ test("pull is needed when the previous pull was incomplete", () => {
   assert.equal(needsPull(doc, "other", 3), true);
   assert.equal(needsPull(doc, "h", 4), true);
   assert.equal(needsPull({ ...doc, pullIncomplete: true }, "h", 3), true);
+});
+
+test("a freshly uploaded document does not need a pull on the next sync", () => {
+  const doc = newUploadedDoc(
+    {
+      attachmentKey: "ATT",
+      libraryID: 1,
+      rmDocId: "id",
+      originalPageCount: 2,
+      appendedPageCount: 0,
+      pageBoxes: [],
+    },
+    3,
+  );
+  assert.equal(doc.converterVersion, 3);
+  assert.deepEqual(doc.imported, {});
+  // push() then records the hash the tablet reports after the upload.
+  doc.rmDocHash = "h";
+  assert.equal(needsPull(doc, "h", 3), false);
+  // A later converter bump still re-imports it.
+  assert.equal(needsPull(doc, "h", 4), true);
 });
 
 test("nextRmDocHash records the new hash only when the tablet did not change", () => {

@@ -35,6 +35,7 @@ import {
   formatCandidateFailures,
   keysToErase,
   needsPull,
+  newUploadedDoc,
   nextRmDocHash,
   readPages,
 } from "./pullPlan";
@@ -249,18 +250,20 @@ export class SyncEngine {
       // finds no entry (forgets it and uploads again) or adopts the entry; its
       // missing fingerprint then makes push replace the PDF.
       const rmDocId = uuid4();
-      doc = {
-        attachmentKey: att.key,
-        libraryID: att.libraryID,
-        rmDocId,
-        originalPageCount: built.originalPageCount,
-        appendedPageCount: built.appendedPageCount,
-        pageBoxes: built.pageBoxes,
-        imported: {},
-        detachedImported: detachedImported.length
-          ? detachedImported
-          : undefined,
-      };
+      doc = newUploadedDoc(
+        {
+          attachmentKey: att.key,
+          libraryID: att.libraryID,
+          rmDocId,
+          originalPageCount: built.originalPageCount,
+          appendedPageCount: built.appendedPageCount,
+          pageBoxes: built.pageBoxes,
+          detachedImported: detachedImported.length
+            ? detachedImported
+            : undefined,
+        },
+        CONVERTER_VERSION,
+      );
       this.state.set(doc);
       await this.state.save();
       const uploaded = await this.cloud.uploadPdf(
