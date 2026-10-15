@@ -1,4 +1,5 @@
 /** Zotero-side helpers: read Zotero data and write imported annotations. */
+import { mergeAnnotationFields } from "./annotationMerge";
 import type { AnnotationCandidate, NoteCandidate } from "./convert";
 import { fitInkPosition } from "./inkFit";
 import {
@@ -158,6 +159,20 @@ export async function saveAnnotation(
         `[reMarkable] ink ${c.rmKey} too large: dropped ${fitted.droppedPaths} stroke(s)`,
       );
   }
+  // An update keeps what the user edited in Zotero (comment, tags).
+  const found = key
+    ? (Zotero.Items.getByLibraryAndKey(attachment.libraryID, key) as
+        | Zotero.Item
+        | false)
+    : false;
+  const existing =
+    found !== false && found.isAnnotation()
+      ? {
+          comment: found.annotationComment ?? "",
+          tags: found.getTags() as { tag: string; type?: number }[],
+        }
+      : undefined;
+  const merged = mergeAnnotationFields(c.json, IMPORT_TAG, existing);
   const json: any = {
     key: key ?? (Zotero as any).DataObjectUtilities.generateKey(),
     type: c.json.type,
@@ -165,9 +180,9 @@ export async function saveAnnotation(
     pageLabel: c.json.pageLabel,
     sortIndex: c.json.sortIndex,
     position,
-    comment: c.json.comment ?? "",
+    comment: merged.comment,
     authorName: AUTHOR,
-    tags: [{ name: IMPORT_TAG }],
+    tags: merged.tags,
   };
   if (c.json.type === "highlight") json.text = c.json.text ?? "";
   const item = await Zotero.Annotations.saveFromJSON(attachment, json);
