@@ -5,6 +5,7 @@ import {
   formatCandidateFailures,
   keysToErase,
   needsPull,
+  nextRmDocHash,
   readPages,
 } from "../../src/sync/pullPlan";
 
@@ -81,6 +82,20 @@ test("pull is needed when the previous pull was incomplete", () => {
   assert.equal(needsPull(doc, "other", 3), true);
   assert.equal(needsPull(doc, "h", 4), true);
   assert.equal(needsPull({ ...doc, pullIncomplete: true }, "h", 3), true);
+});
+
+test("nextRmDocHash records the new hash only when the tablet did not change", () => {
+  // Merged onto exactly what we last pulled: safe to advance.
+  assert.equal(nextRmDocHash("h1", { baseHash: "h1", hash: "h2" }), "h2");
+  // The tablet committed after the pull: the next sync must pull first.
+  assert.equal(nextRmDocHash("h1", { baseHash: "h9", hash: "h2" }), undefined);
+  // Nothing recorded (never pulled, or reset): never claim to be up to date.
+  assert.equal(
+    nextRmDocHash(undefined, { baseHash: "h1", hash: "h2" }),
+    undefined,
+  );
+  // A change that did nothing keeps the recorded hash.
+  assert.equal(nextRmDocHash("h1", { baseHash: "h1", hash: "h1" }), "h1");
 });
 
 test("a page without an .rm blob is empty, not unreadable", () => {

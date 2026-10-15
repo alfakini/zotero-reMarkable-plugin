@@ -13,6 +13,7 @@ import {
   decide,
   htmlToParagraphs,
   isSyncedNoteTitle,
+  landedPages,
   mergeConflict,
   nextNoteTitle,
   paragraphsToHtml,
@@ -128,4 +129,17 @@ test("note text round-trips through .rm pages, keeping handwriting", () => {
   const hw = fixture("code_as_policies_p1_handwriting.rm");
   const withText = writePageText(hw, body, { authorUuid: AUTHOR });
   assert.equal(parseRm(withText).lines.length, parseRm(hw).lines.length);
+});
+
+test("landedPages reports the added pages that exist after a lost response", () => {
+  assert.deepEqual(landedPages(["a", "b"], ["x", "a", "b"]), ["a", "b"]);
+  // The write is one root swap: any added page present means it landed.
+  assert.deepEqual(landedPages(["a", "b"], new Set(["b"])), ["b"]);
+});
+
+test("landedPages commits nothing when the pages are absent or unreadable", () => {
+  assert.deepEqual(landedPages(["a"], ["x", "y"]), []);
+  assert.deepEqual(landedPages(["a"], []), []);
+  assert.deepEqual(landedPages(["a"], undefined), []);
+  assert.deepEqual(landedPages([], ["a"]), []);
 });

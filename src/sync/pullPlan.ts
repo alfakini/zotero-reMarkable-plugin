@@ -1,5 +1,6 @@
 /** Pure (Zotero-free) decisions for the pull pass, unit-testable in Node. */
 
+import type { ChangedDocument } from "../remarkable/cloud";
 export interface ImportedLike {
   kind: "annotation" | "note";
 }
@@ -116,4 +117,21 @@ export function needsPull(
     doc.converterVersion !== converterVersion ||
     !!doc.pullIncomplete
   );
+}
+/**
+ * The `rmDocHash` to record after we changed the tablet document. `known` is
+ * the hash we last pulled or recorded; `changed.baseHash` is the document
+ * entry our change was merged onto and `changed.hash` the result. Only when
+ * the base is what we knew has the tablet not changed in between, so the new
+ * hash is safe to record. Otherwise (or when nothing is known) undefined makes
+ * the next sync pull first instead of skipping tablet changes that were never
+ * imported.
+ */
+export function nextRmDocHash(
+  known: string | undefined,
+  changed: ChangedDocument,
+): string | undefined {
+  return known !== undefined && known === changed.baseHash
+    ? changed.hash
+    : undefined;
 }

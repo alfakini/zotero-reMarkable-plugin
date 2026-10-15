@@ -33,6 +33,7 @@ import {
   formatCandidateFailures,
   keysToErase,
   needsPull,
+  nextRmDocHash,
   readPages,
 } from "./pullPlan";
 import type { SyncStateStore, DocState } from "./state";
@@ -154,7 +155,9 @@ export class SyncEngine {
           if (tabletChanged || notesPrint !== doc.notesFingerprint) {
             const r = await syncNotes(this.cloud, att, doc, this.authorId);
             report.notes += r.toTablet + r.toZotero + r.created + r.removed;
-            if (r.newHash) doc.rmDocHash = r.newHash;
+            if (r.changed) {
+              doc.rmDocHash = nextRmDocHash(doc.rmDocHash, r.changed);
+            }
             doc.notesFingerprint = notesFingerprint(att, doc);
             this.state.set(doc);
           }
@@ -209,7 +212,14 @@ export class SyncEngine {
     });
     const pageCount = built.originalPageCount + built.appendedPageCount;
     if (doc && doc.originalPageCount === built.originalPageCount) {
-      await this.cloud.replacePdf(doc.rmDocId, built.bytes, pageCount);
+      const replaced = await this.cloud.replacePdf(
+        doc.rmDocId,
+        built.bytes,
+        pageCount,
+      );
+      // Only advance the recorded hash when the tablet did not change the
+      // document since we last pulled it; otherwise the next sync pulls first.
+      doc.rmDocHash = nextRmDocHash(doc.rmDocHash, replaced);
       report.updated++;
     } else {
       if (doc) await this.cloud.trashDocument(doc.rmDocId);
@@ -229,12 +239,12 @@ export class SyncEngine {
         imported: {},
       };
       report.uploaded++;
+      doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
     }
     doc.appendedPageCount = built.appendedPageCount;
     doc.pageBoxes = built.pageBoxes;
     doc.uploadedFingerprint = print;
     doc.lastError = undefined;
-    doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
     doc.lastSync = new Date().toISOString();
     this.state.set(doc);
   }

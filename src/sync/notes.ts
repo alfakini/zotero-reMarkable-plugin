@@ -10,6 +10,7 @@
  * Supported formatting both ways: paragraphs, headings and bullet lists.
  */
 import { ParagraphStyle, type RmParagraph } from "../remarkable/rmscene";
+import type { NotePageRecord } from "./state";
 
 export const NOTE_TITLE_PREFIX = "reMarkable Note";
 
@@ -169,6 +170,125 @@ export function decide(
   if (tablet === base) return "toTablet";
   if (zotero === base) return "toZotero";
   return "conflict";
+}
+
+/**
+ * What to do with one existing note/page pair, and the three-way base to
+ * record once each half has actually been written. A base is only true after
+ * the write it describes, so it is assigned in two stages (see applyPairPlan).
+ */
+export interface PairPlan {
+  action: NoteAction;
+  /** Body to write into the Zotero note (toZotero, conflict). */
+  zoteroBody?: RmParagraph[];
+  /** Body to write to the tablet page (toTablet, conflict). */
+  tabletBody?: RmParagraph[];
+  /**
+   * Base that is true once the Zotero half is done: the text the tablet still
+   * holds (toZotero: it was copied over; conflict: Zotero now has the merged
+   * text and the tablet is untouched, so the merged text is simply pushed on
+   * retry instead of being merged again). Undefined keeps the current base.
+   */
+  baseAfterZotero?: string;
+  /** Base that is true once the tablet half is written too. */
+  baseAfterTablet: string;
+}
+
+export function planPair(
+  base: string | undefined,
+  zotero: RmParagraph[],
+  tablet: RmParagraph[],
+): PairPlan {
+  const zPlain = plainText(zotero);
+  const tPlain = plainText(tablet);
+  const action = decide(base, zPlain, tPlain);
+  switch (action) {
+    case "toTablet":
+      return {
+        action,
+        tabletBody: withTabletStyles(zotero, tablet),
+        baseAfterTablet: zPlain,
+      };
+    case "toZotero":
+      return {
+        action,
+        zoteroBody: tablet,
+        baseAfterZotero: tPlain,
+        baseAfterTablet: tPlain,
+      };
+    case "conflict": {
+      const merged = mergeConflict(zotero, tablet);
+      return {
+        action,
+        zoteroBody: merged,
+        tabletBody: merged,
+        baseAfterZotero: tPlain,
+        baseAfterTablet: plainText(merged),
+      };
+    }
+    case "none":
+      return {
+        action,
+        baseAfterZotero: zPlain,
+        baseAfterTablet: zPlain,
+      };
+  }
+}
+
+/**
+ * Record changes that only become true after the single tablet write
+ * (updateDocument) succeeds: the base of a pair whose page is rewritten, a
+ * newly created pairing, a deleted pairing. Nothing is applied if that write
+ * throws, so the persisted records always describe what both sides hold.
+ */
+export class TabletCommits {
+  private effects: (() => void)[] = [];
+  defer(effect: () => void) {
+    this.effects.push(effect);
+  }
+  commit() {
+    const effects = this.effects;
+    this.effects = [];
+    for (const effect of effects) effect();
+  }
+}
+
+/**
+ * After updateDocument threw something other than "the tablet changed": the
+ * root PUT is never retried, so the server may have applied it with only the
+ * response lost. Given the pages that write added and the pages the document
+ * really has now (undefined if it could not be read), return the added pages
+ * that exist on the tablet. The write is a single root swap, so any of them
+ * means all of it landed and the deferred pairings must be recorded; none
+ * means it did not, and nothing is committed.
+ */
+export function landedPages(
+  addedPageIds: readonly string[],
+  livePageIds: Iterable<string> | undefined,
+): string[] {
+  if (!livePageIds) return [];
+  const live = new Set(livePageIds);
+  return addedPageIds.filter((id) => live.has(id));
+}
+
+/**
+ * Carry out a plan for one pair. `writeZotero` (if any) rewrites the note
+ * and records the drawing fields itself; the record is untouched while it
+ * throws. The tablet half of the base is deferred to `tabletCommits`.
+ */
+export async function applyPairPlan(
+  rec: NotePageRecord,
+  plan: PairPlan,
+  writeZotero: (() => Promise<void>) | undefined,
+  tabletCommits: TabletCommits,
+) {
+  if (writeZotero) await writeZotero();
+  if (plan.baseAfterZotero !== undefined) rec.base = plan.baseAfterZotero;
+  if (plan.tabletBody) {
+    tabletCommits.defer(() => {
+      rec.base = plan.baseAfterTablet;
+    });
+  }
 }
 
 /** Keep both versions when each side changed: Zotero's first, then the tablet's. */
