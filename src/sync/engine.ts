@@ -26,6 +26,7 @@ import {
   splitPageTexts,
 } from "./convert";
 import { resolveFolderId } from "./folderCache";
+import { LARGE_PDF_BYTES, largePdfWarning } from "./largePdf";
 import { Mutex } from "./mutex";
 import { titleToPush } from "./titlePush";
 import {
@@ -178,7 +179,14 @@ export class SyncEngine {
               : Promise.resolve(undefined);
           },
         );
-        await this.push(att, doc, folderId, report);
+        await this.push(
+          att,
+          doc,
+          folderId,
+          report,
+          progress,
+          i / attachments.length,
+        );
         doc = this.state.get(att.libraryID, att.key);
         if (doc && att.parentID) {
           const notesPrint = notesFingerprint(att, doc);
@@ -220,6 +228,8 @@ export class SyncEngine {
     doc: DocState | undefined,
     folderId: string,
     report: SyncReport,
+    progress: Progress,
+    fraction: number,
   ) {
     const path = await att.getFilePathAsync();
     if (!path) throw new Error("PDF file is missing");
@@ -253,8 +263,17 @@ export class SyncEngine {
       return;
     }
 
+    if (stat.size !== undefined && stat.size >= LARGE_PDF_BYTES) {
+      const warning = largePdfWarning(title, stat.size);
+      // Keep the caller's fraction so the progress bar does not reset.
+      progress(warning, fraction);
+      Zotero.debug(`[reMarkable] ${warning}`);
+    }
+
     // Copy into this realm: typed arrays from privileged APIs fail
     // `instanceof Uint8Array` checks inside the plugin sandbox (pdf-lib).
+    // This realm copy is needed, so it is kept; nothing else here copies the
+    // bytes before pdf-lib loads them.
     const pdf = new Uint8Array(await IOUtils.read(path));
     const built = await buildRemarkablePdf(pdf, annotations, notes, {
       appendNotesPages: this.settings().appendNotesPages,
