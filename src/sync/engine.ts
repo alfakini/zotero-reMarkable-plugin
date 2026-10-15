@@ -26,6 +26,7 @@ import {
   splitPageTexts,
 } from "./convert";
 import { Mutex } from "./mutex";
+import { titleToPush } from "./titlePush";
 import {
   migrateImportedPageNotes,
   notesFingerprint,
@@ -216,14 +217,29 @@ export class SyncEngine {
       mtime: stat.lastModified,
       appendNotesPages: this.settings().appendNotesPages,
     });
-    if (doc && doc.uploadedFingerprint === print) return;
+    const title = remarkableTitle(att);
+    if (doc && doc.uploadedFingerprint === print) {
+      // Nothing to rebuild, but a renamed item must still reach the tablet.
+      // Without a recorded title (synced before it was tracked) only record
+      // it; the tablet name is not overwritten.
+      const rename = titleToPush(doc.pushedTitle, title);
+      if (rename !== undefined) {
+        const renamed = await this.cloud.renameDocument(doc.rmDocId, rename);
+        doc.rmDocHash = nextRmDocHash(doc.rmDocHash, renamed);
+      }
+      if (doc.pushedTitle !== title) {
+        doc.pushedTitle = title;
+        this.state.set(doc);
+      }
+      return;
+    }
 
     // Copy into this realm: typed arrays from privileged APIs fail
     // `instanceof Uint8Array` checks inside the plugin sandbox (pdf-lib).
     const pdf = new Uint8Array(await IOUtils.read(path));
     const built = await buildRemarkablePdf(pdf, annotations, notes, {
       appendNotesPages: this.settings().appendNotesPages,
-      title: remarkableTitle(att),
+      title,
     });
     const pageCount = built.originalPageCount + built.appendedPageCount;
     if (doc && doc.originalPageCount === built.originalPageCount) {
@@ -231,6 +247,7 @@ export class SyncEngine {
         doc.rmDocId,
         built.bytes,
         pageCount,
+        titleToPush(doc.pushedTitle, title),
       );
       // Only advance the recorded hash when the tablet did not change the
       // document since we last pulled it; otherwise the next sync pulls first.
@@ -271,7 +288,7 @@ export class SyncEngine {
       this.state.set(doc);
       await this.state.save();
       const uploaded = await this.cloud.uploadPdf(
-        remarkableTitle(att),
+        title,
         built.bytes,
         pageCount,
         folderId,
@@ -283,6 +300,7 @@ export class SyncEngine {
     doc.appendedPageCount = built.appendedPageCount;
     doc.pageBoxes = built.pageBoxes;
     doc.uploadedFingerprint = print;
+    doc.pushedTitle = title;
     doc.lastError = undefined;
     doc.lastSync = new Date().toISOString();
     this.state.set(doc);
