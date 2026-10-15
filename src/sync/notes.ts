@@ -67,26 +67,98 @@ export interface ParsedNote {
   body: RmParagraph[];
 }
 
-/** Split Zotero note HTML into its title (first block) and body paragraphs. */
+const BLOCK_TAGS = new Set(["p", "li", "pre", "blockquote"]);
+const HEADING_RE = /^h[1-6]$/;
+const TAG_RE =
+  /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
+const SCRIPT_CLOSE_RE = /<\/script/gi;
+const STYLE_CLOSE_RE = /<\/style/gi;
+
+/**
+ * Split Zotero note HTML into its title (first block) and body paragraphs.
+ *
+ * A small tolerant tokenizer rather than a DOM, so it runs in Node tests. Each
+ * block element (headings, p, li, pre, blockquote) becomes one paragraph;
+ * nesting depth of ul/ol decides BULLET vs BULLET2. Unknown or unbalanced tags
+ * never throw: a block tag always closes the block before it.
+ */
 export function htmlToParagraphs(html: string): ParsedNote {
-  const flat = html
-    // Zotero wraps list item content in <p>.
-    .replace(/<li([^>]*)>\s*<p[^>]*>/gi, "<li$1>")
-    .replace(/<\/p>\s*<\/li>/gi, "</li>");
   const blocks: RmParagraph[] = [];
-  const re = /<(h[1-6]|p|li|pre|blockquote)\b[^>]*>([\s\S]*?)<\/\1>/gi;
-  for (let m = re.exec(flat); m; m = re.exec(flat)) {
-    const tag = m[1].toLowerCase();
-    const text = inlineText(m[2]);
-    const style = tag.startsWith("h")
-      ? ParagraphStyle.HEADING
-      : tag === "li"
-        ? ParagraphStyle.BULLET
-        : ParagraphStyle.PLAIN;
-    blocks.push({ style, text });
+  // One entry per open ul/ol; true while an <li> is open at that level.
+  const lists: boolean[] = [];
+  let quotes = 0;
+  let cur: { style: number; text: string; container: boolean } | null = null;
+
+  const bulletStyle = () =>
+    lists.length >= 2 ? ParagraphStyle.BULLET2 : ParagraphStyle.BULLET;
+  const flush = () => {
+    if (!cur) return;
+    const text = inlineText(cur.text);
+    // Structural wrappers (li/blockquote opened just before a child block)
+    // are not paragraphs of their own when empty.
+    if (text || !cur.container) blocks.push({ style: cur.style, text });
+    cur = null;
+  };
+  const open = (style: number, container = false) => {
+    flush();
+    cur = { style, text: "", container };
+  };
+  const addText = (text: string) => {
+    if (!text) return;
+    if (!cur && text.trim() && (lists.length || quotes)) {
+      // Text after a nested list inside an <li>, or directly in a blockquote.
+      open(lists.length ? bulletStyle() : ParagraphStyle.PLAIN);
+    }
+    if (cur) cur.text += text;
+  };
+
+  let pos = 0;
+  TAG_RE.lastIndex = 0;
+  for (let m = TAG_RE.exec(html); m; m = TAG_RE.exec(html)) {
+    addText(html.slice(pos, m.index));
+    pos = m.index + m[0].length;
+    if (m[0].startsWith("<!--")) continue;
+    const closing = m[1] === "/";
+    const tag = m[2].toLowerCase();
+    if ((tag === "script" || tag === "style") && !closing) {
+      // Search the original string: lowercasing can change its length.
+      const closeRe = tag === "script" ? SCRIPT_CLOSE_RE : STYLE_CLOSE_RE;
+      closeRe.lastIndex = pos;
+      const end = closeRe.exec(html);
+      pos = end ? end.index : html.length;
+      TAG_RE.lastIndex = pos;
+    } else if (tag === "br") {
+      addText(" ");
+    } else if (tag === "ul" || tag === "ol") {
+      flush();
+      if (closing) lists.pop();
+      else lists.push(false);
+    } else if (closing) {
+      if (tag === "li") lists[lists.length - 1] = false;
+      if (tag === "blockquote") quotes = Math.max(0, quotes - 1);
+      if (HEADING_RE.test(tag) || BLOCK_TAGS.has(tag)) flush();
+    } else if (HEADING_RE.test(tag)) {
+      open(ParagraphStyle.HEADING);
+    } else if (BLOCK_TAGS.has(tag)) {
+      if (tag === "li") {
+        // A stray <li> outside any list still gets a one-level bullet.
+        if (!lists.length) lists.push(false);
+        lists[lists.length - 1] = true;
+        open(bulletStyle(), true);
+      } else if (tag === "blockquote") {
+        quotes++;
+        open(ParagraphStyle.PLAIN, true);
+      } else {
+        // Zotero wraps list item content in <p>; it keeps the bullet style.
+        const inItem = lists.length > 0 && lists[lists.length - 1];
+        open(inItem ? bulletStyle() : ParagraphStyle.PLAIN);
+      }
+    }
   }
+  addText(html.slice(pos));
+  flush();
   if (!blocks.length) {
-    const text = inlineText(flat.replace(/<\/(div|p)>/gi, "\n"));
+    const text = inlineText(html.replace(/<\/(div|p)>/gi, "\n"));
     if (text) blocks.push({ style: ParagraphStyle.PLAIN, text });
   }
   const [first, ...rest] = blocks;
@@ -114,22 +186,51 @@ export function paragraphsToHtml(
   drawing?: NoteDrawing,
 ) {
   let html = `<h1>${escapeHtml(title)}</h1>`;
-  let inList = false;
+  // List state: a ul, the li open inside it, and a nested ul inside that li.
+  let ul = false;
+  let li = false;
+  let nested = false;
+  const closeNested = () => {
+    if (nested) html += "</ul>";
+    nested = false;
+  };
+  const closeItem = () => {
+    closeNested();
+    if (li) html += "</li>";
+    li = false;
+  };
+  const closeList = () => {
+    closeItem();
+    if (ul) html += "</ul>";
+    ul = false;
+  };
   for (const p of trimEmpty(body)) {
-    const bullet =
-      p.style === ParagraphStyle.BULLET || p.style === ParagraphStyle.BULLET2;
-    if (bullet !== inList) {
-      html += bullet ? "<ul>" : "</ul>";
-      inList = bullet;
-    }
+    const level2 = p.style === ParagraphStyle.BULLET2;
+    const bullet = level2 || p.style === ParagraphStyle.BULLET;
     let text = escapeHtml(p.text);
     if (p.style === ParagraphStyle.CHECKBOX) text = `☐ ${text}`;
     if (p.style === ParagraphStyle.CHECKBOX_CHECKED) text = `☑ ${text}`;
-    if (bullet) html += `<li><p>${text}</p></li>`;
-    else if (p.style === ParagraphStyle.HEADING) html += `<h2>${text}</h2>`;
+    if (bullet) {
+      if (level2 && li) {
+        // Nested list inside the parent item, which stays open for siblings.
+        if (!nested) html += "<ul>";
+        nested = true;
+        html += `<li><p>${text}</p></li>`;
+      } else {
+        // A BULLET2 with no parent item opens a list as a normal bullet.
+        closeItem();
+        if (!ul) html += "<ul>";
+        ul = true;
+        html += `<li><p>${text}</p>`;
+        li = true;
+      }
+      continue;
+    }
+    closeList();
+    if (p.style === ParagraphStyle.HEADING) html += `<h2>${text}</h2>`;
     else html += `<p>${text}</p>`;
   }
-  if (inList) html += "</ul>";
+  closeList();
   if (drawing) {
     html += `<p>${drawingImg(drawing)}</p>`;
   }

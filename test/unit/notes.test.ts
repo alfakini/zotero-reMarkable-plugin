@@ -222,6 +222,136 @@ test("pairState reports a page deleted on the tablet first", () => {
   assert.equal(pairState(false, undefined, true), "pageGone");
 });
 
+test("parses nested unordered lists into BULLET and BULLET2", () => {
+  const html =
+    "<h1>T</h1><ul><li><p>one</p>" +
+    "<ul><li><p>one.a</p></li><li><p>one.b</p></li></ul></li>" +
+    "<li><p>two</p></li></ul><p>after</p>";
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.BULLET, text: "one" },
+    { style: S.BULLET2, text: "one.a" },
+    { style: S.BULLET2, text: "one.b" },
+    { style: S.BULLET, text: "two" },
+    { style: S.PLAIN, text: "after" },
+  ]);
+});
+
+test("nested list without <p> wrappers keeps text around the sublist", () => {
+  const html =
+    "<h1>T</h1><ul><li>parent<ol><li>child 1</li><li>child 2</li></ol>tail</li></ul>";
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.BULLET, text: "parent" },
+    { style: S.BULLET2, text: "child 1" },
+    { style: S.BULLET2, text: "child 2" },
+    { style: S.BULLET, text: "tail" },
+  ]);
+});
+
+test("nested lists round-trip through paragraphsToHtml", () => {
+  const body = [
+    { style: S.BULLET, text: "one" },
+    { style: S.BULLET2, text: "one.a" },
+    { style: S.BULLET2, text: "one.b" },
+    { style: S.BULLET, text: "two" },
+    { style: S.PLAIN, text: "after" },
+    { style: S.BULLET, text: "three" },
+    { style: S.BULLET2, text: "three.a" },
+  ];
+  const html = paragraphsToHtml("T", body);
+  assert.ok(
+    html.includes(
+      "<ul><li><p>one</p><ul><li><p>one.a</p></li><li><p>one.b</p></li></ul></li><li><p>two</p></li></ul><p>after</p>",
+    ),
+    html,
+  );
+  assert.deepEqual(htmlToParagraphs(html).body, body);
+});
+
+test("paragraphsToHtml opens a list for a BULLET2 without a parent", () => {
+  const html = paragraphsToHtml("T", [
+    { style: S.BULLET2, text: "orphan" },
+    { style: S.BULLET2, text: "sibling" },
+    { style: S.PLAIN, text: "end" },
+  ]);
+  assert.ok(
+    html.includes(
+      "<ul><li><p>orphan</p><ul><li><p>sibling</p></li></ul></li></ul><p>end</p>",
+    ),
+    html,
+  );
+  assert.deepEqual(
+    htmlToParagraphs(html).body.map((p) => p.text),
+    ["orphan", "sibling", "end"],
+  );
+});
+
+test("script and style blocks are skipped, even after characters that change length when lowercased", () => {
+  // U+0130 lowercases to two code units, shifting offsets into a lowercased copy.
+  const wide = "\u0130".repeat(40);
+  const html =
+    `<h1>T</h1><p>${wide} text</p>` +
+    "<SCRIPT>var a = '<p>x</p>';</SCRIPT><p>after script</p>" +
+    "<style>p { color: red }</STYLE><p>after style</p>";
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.PLAIN, text: `${wide} text` },
+    { style: S.PLAIN, text: "after script" },
+    { style: S.PLAIN, text: "after style" },
+  ]);
+  // An unterminated script swallows the rest instead of throwing.
+  assert.deepEqual(htmlToParagraphs("<h1>T</h1><script>never closed").body, []);
+});
+
+test("ordered lists become bullets", () => {
+  const html = "<h1>T</h1><ol><li><p>first</p></li><li><p>second</p></li></ol>";
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.BULLET, text: "first" },
+    { style: S.BULLET, text: "second" },
+  ]);
+});
+
+test("blockquote paragraphs stay separate paragraphs", () => {
+  const html =
+    "<h1>T</h1><blockquote><p>quoted one</p><p>quoted <em>two</em></p></blockquote><p>plain</p>";
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.PLAIN, text: "quoted one" },
+    { style: S.PLAIN, text: "quoted two" },
+    { style: S.PLAIN, text: "plain" },
+  ]);
+  assert.deepEqual(
+    htmlToParagraphs("<h1>T</h1><blockquote>bare quote</blockquote>").body,
+    [{ style: S.PLAIN, text: "bare quote" }],
+  );
+});
+
+test("pre blocks and images", () => {
+  const html =
+    '<h1>T</h1><pre><code>let a = 1;\n  let b = &lt;2&gt;;</code></pre><p><img src="x.png"/></p><p>end</p>';
+  assert.deepEqual(htmlToParagraphs(html).body, [
+    { style: S.PLAIN, text: "let a = 1; let b = <2>;" },
+    { style: S.PLAIN, text: "end" },
+  ]);
+});
+
+test("tolerates malformed note HTML", () => {
+  // Unclosed list items and paragraphs, stray closing tags, bare "<".
+  const html =
+    "</ul></li><h1>Title<ul><li>a<li>b</ul></blockquote><p>x < y<p>z</div>";
+  const note = htmlToParagraphs(html);
+  assert.equal(note.title, "Title");
+  assert.deepEqual(note.body, [
+    { style: S.BULLET, text: "a" },
+    { style: S.BULLET, text: "b" },
+    { style: S.PLAIN, text: "x < y" },
+    { style: S.PLAIN, text: "z" },
+  ]);
+  assert.deepEqual(htmlToParagraphs("just text &amp; more"), {
+    title: "just text & more",
+    body: [],
+  });
+  assert.equal(htmlToParagraphs("<p>a<!-- <p>hidden</p> -->b</p>").title, "ab");
+  assert.deepEqual(htmlToParagraphs(""), { title: "", body: [] });
+});
+
 test("erases a note created in this call when a later step throws, then rethrows", async () => {
   let erased = 0;
   await assert.rejects(
