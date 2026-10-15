@@ -33,7 +33,7 @@ Zotero ──── PDF + Zotero highlights/notes ────▶ reMarkable
 | Typed text on a PDF page                                                                | `note` (sticky note) annotation                                                                             |
 | Pen strokes in the margin, outside the PDF page, or on the appended "Zotero notes" page | Child **note** with an SVG drawing of the handwriting                                                       |
 
-Imported annotations get the tag `reMarkable` and author name "reMarkable".
+Imported annotations and notes get the tag `reMarkable import` and author name "reMarkable". This is separate from the `reMarkable` tag used to mark items for sync.
 
 ### Notes ↔ note pages (two-way)
 

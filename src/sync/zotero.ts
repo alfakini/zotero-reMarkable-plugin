@@ -19,7 +19,8 @@ import { skipKeys } from "./detached";
 import type { DocState } from "./state";
 import type { ZAnnotation, ZNote } from "./types";
 
-export const IMPORT_TAG = "reMarkable";
+/** Tag on imported annotations and notes. Must differ from the default `syncTag` pref, which users apply to mark items for sync. */
+export const IMPORT_TAG = "reMarkable import";
 const AUTHOR = "reMarkable";
 
 /** PDF attachments for a mix of regular items and attachments. */
