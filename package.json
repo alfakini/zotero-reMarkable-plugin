@@ -12,13 +12,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alfakini/zotero-remarkable.git"
+    "url": "git+https://github.com/alfakini/zotero-reMarkable-plugin.git"
   },
   "author": "Alan Fachini",
   "bugs": {
-    "url": "https://github.com/alfakini/zotero-remarkable/issues"
+    "url": "https://github.com/alfakini/zotero-reMarkable-plugin/issues"
   },
-  "homepage": "https://github.com/alfakini/zotero-remarkable#readme",
+  "homepage": "https://github.com/alfakini/zotero-reMarkable-plugin#readme",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "start": "zotero-plugin serve",
