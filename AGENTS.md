@@ -15,6 +15,8 @@ npm run lint:check     # prettier + eslint (CI)
 node --import tsx --test --test-name-pattern "<name>" test/unit/*.test.ts
 ```
 
+Release: `npm run release` bumps the version, tags `vX.Y.Z` and pushes; the tag triggers `.github/workflows/release.yml`, which publishes the GitHub release with `zotero-remarkable-sync.xpi` and refreshes `update.json` on the `release` release (Zotero's update URL).
+
 Install a built `.xpi`: quit Zotero, copy it into the profile's extensions directory, relaunch. Reinstalling from inside Zotero doesn't reliably apply.
 
 ## Structure

@@ -2,9 +2,7 @@
   "mcpServers": {
     "@introfini/mcp-server-zotero-dev": {
       "command": "npx",
-      "args": [
-        "@introfini/mcp-server-zotero-dev"
-      ]
+      "args": ["@introfini/mcp-server-zotero-dev"]
     }
   }
 }

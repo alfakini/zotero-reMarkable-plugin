@@ -70,7 +70,10 @@ Other child notes are read-only on the tablet: they are listed on the appended
 
 ## Install
 
-1. Download the `.xpi` from Releases (or build it, see below).
+1. Download
+   [`zotero-remarkable-sync.xpi`](https://github.com/alfakini/zotero-reMarkable-plugin/releases/latest/download/zotero-remarkable-sync.xpi)
+   from the [latest release](https://github.com/alfakini/zotero-reMarkable-plugin/releases/latest)
+   (or build it, see below). Zotero checks the releases for updates automatically.
 2. In Zotero: **Tools → Plugins → ⚙ → Install Plugin From File…**
 3. **Zotero Settings → reMarkable**: click **Get one-time code…**, sign in, copy
    the 8-letter code from <https://my.remarkable.com/device/browser/connect> and
@@ -117,6 +120,18 @@ npm run build          # .scaffold/build/*.xpi + type-check
 npm run test:unit      # parser / protocol / conversion tests (Node)
 npm run lint:fix
 ```
+
+### Releasing
+
+```bash
+npm run release        # pick the version; commits, tags vX.Y.Z and pushes
+```
+
+The pushed tag runs `.github/workflows/release.yml`, which tests and builds the
+plugin, creates the GitHub release `vX.Y.Z` with `zotero-remarkable-sync.xpi`
+attached, and updates `update.json` on the `release` release (the plugin's
+`update_url`, used by Zotero for automatic updates). Versions with a `-` suffix
+are published as pre-releases.
 
 `scripts/pull-preview.mts` downloads a document, runs the import conversion and
 writes a PDF with the result drawn on top, which is handy for checking coordinates.

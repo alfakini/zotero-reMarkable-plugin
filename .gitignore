@@ -14,3 +14,5 @@ tsconfig.tsbuildinfo
 .scaffold
 build
 logs
+# Claude Code per-machine settings
+.claude/settings.local.json

@@ -7,6 +7,8 @@ export default defineConfig({
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
+  // Stable asset name, so releases/latest/download/<name>.xpi always works.
+  xpiName: "zotero-remarkable-sync",
   updateURL: `https://github.com/{{owner}}/{{repo}}/releases/download/release/${
     pkg.version.includes("-") ? "update-beta.json" : "update.json"
   }`,
@@ -37,6 +39,12 @@ export default defineConfig({
         outfile: `.scaffold/build/addon/content/scripts/${pkg.config.addonRef}.js`,
       },
     ],
+  },
+
+  release: {
+    bumpp: {
+      commit: "Release v%s",
+    },
   },
 
   test: {

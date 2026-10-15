@@ -1,21 +1,32 @@
 name: Release
 
+# Push a version tag (e.g. `npm run release`, which bumps the version, tags
+# vX.Y.Z and pushes) to publish:
+#   - a GitHub release vX.Y.Z with the .xpi attached, and
+#   - update.json on the "release" release, which Zotero polls for updates.
 on:
   push:
     tags:
-      - v**
+      - "v*"
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
 
 jobs:
-  create-release:
-    uses: zotero-plugin-dev/workflows/.github/workflows/release-plugin.yml@main
-    # You can customize any of the inputs here.
-    # If you omit an input, its default value will be used.
-    with:
-      build: "npm run build"
-      release: "npm run release"
-    secrets: inherit
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the changelog
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+      - run: npm run build
+      - name: Publish GitHub release
+        run: npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
