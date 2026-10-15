@@ -537,44 +537,72 @@ function readRootTextBlock(t: TaggedReader): RmText {
   return { text, x: pos.x, y: pos.y, width, paragraphs, items, lastCharId };
 }
 
-/** Order CRDT sequence items by their left/right links (rmscene algorithm). */
+/**
+ * Order CRDT sequence items by their left/right links (rmscene algorithm).
+ * Kahn's algorithm in waves: every wave is the set of nodes whose
+ * prerequisites were all emitted by earlier waves, sorted by id. Runs in
+ * O((n + e) + n log n) using indegree counts and dependents lists.
+ */
 export function toposort<T extends { id: string; left: string; right: string }>(
   items: T[],
 ): T[] {
   const byId = new Map(items.map((i) => [i.id, i]));
   const side = (id: string, s: "left" | "right") =>
     id === END_MARKER ? (s === "left" ? "__start" : "__end") : id;
-  const deps = new Map<string, Set<string>>();
-  const dep = (k: string) => {
-    let d = deps.get(k);
-    if (!d) {
-      d = new Set();
-      deps.set(k, d);
+  // Nodes get a stable index in first-seen order; prerequisites are sets so a
+  // repeated link counts once.
+  const index = new Map<string, number>();
+  const names: string[] = [];
+  const prereqs: Set<number>[] = [];
+  const dependents: number[][] = [];
+  const node = (k: string) => {
+    let n = index.get(k);
+    if (n === undefined) {
+      n = names.length;
+      index.set(k, n);
+      names.push(k);
+      prereqs.push(new Set());
+      dependents.push([]);
     }
-    return d;
+    return n;
+  };
+  const link = (from: string, to: string) => {
+    // `to` depends on `from`.
+    const f = node(from);
+    const t = node(to);
+    if (prereqs[t].has(f)) return;
+    prereqs[t].add(f);
+    dependents[f].push(t);
   };
   for (const item of items) {
-    dep(item.id).add(side(item.left, "left"));
-    dep(side(item.right, "right")).add(item.id);
+    link(side(item.left, "left"), item.id);
+    link(item.id, side(item.right, "right"));
   }
-  for (const d of [...deps.values()]) for (const k of d) dep(k);
+  const remaining = prereqs.map((p) => p.size);
+  const end = index.get("__end");
   const out: T[] = [];
   const cmp = (a: string, b: string) => {
     const [a1, a2] = a.split(":").map(Number);
     const [b1, b2] = b.split(":").map(Number);
     return a1 - b1 || a2 - b2;
   };
-  while (deps.size) {
-    const ready = [...deps.entries()]
-      .filter(([, d]) => d.size === 0)
-      .map(([k]) => k);
-    if (!ready.length) break; // cycle: give up on the rest
-    if (ready.length === 1 && ready[0] === "__end") break;
-    for (const k of ready.filter((k) => byId.has(k)).sort(cmp))
-      out.push(byId.get(k)!);
-    for (const k of ready) if (k !== "__end") deps.delete(k);
-    for (const d of deps.values()) for (const k of ready) d.delete(k);
-    if (ready.every((k) => k === "__end")) break;
+  let wave: number[] = [];
+  for (let n = 0; n < names.length; n++) if (remaining[n] === 0) wave.push(n);
+  // Stop at a cycle (nothing ready) or when only the end sentinel is left.
+  while (wave.length && !wave.every((n) => n === end)) {
+    const next: number[] = [];
+    for (const n of wave) {
+      for (const d of dependents[n]) if (--remaining[d] === 0) next.push(d);
+    }
+    wave
+      .map((n) => names[n])
+      .filter((k) => byId.has(k))
+      .sort(cmp)
+      .forEach((k) => {
+        out.push(byId.get(k)!);
+      });
+    // Keep first-seen order so ties sort exactly as a full rescan would.
+    wave = next.sort((x, y) => x - y);
   }
   // Anything left (malformed links) is appended rather than dropped.
   if (out.length < items.length) {
