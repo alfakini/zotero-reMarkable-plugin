@@ -6,6 +6,7 @@ import {
 } from "../remarkable/cloud";
 import { uuid4 } from "../remarkable/hash";
 import { SyncEngine, type SyncReport } from "../sync/engine";
+import { Mutex } from "../sync/mutex";
 import { SyncStateStore } from "../sync/state";
 import { pdfAttachments } from "../sync/zotero";
 import { getString } from "../utils/locale";
@@ -14,9 +15,16 @@ import { getPref, setPref } from "../utils/prefs";
 export class RemarkableService {
   private engine?: SyncEngine;
   private timerGeneration = 0;
+  /** Shared by every engine so a replaced engine cannot overlap a running one. */
+  private readonly lock = new Mutex();
   readonly state = new SyncStateStore(
     PathUtils.join(Zotero.DataDirectory.dir, "remarkable-sync", "state.json"),
   );
+
+  /** True while a sync, tablet removal or re-import cleanup is running or queued. */
+  get busy() {
+    return this.lock.locked;
+  }
 
   get connected() {
     return !!getPref("deviceToken");
@@ -40,6 +48,7 @@ export class RemarkableService {
           importHandwriting: getPref("importHandwriting"),
         }),
         this.deviceId(),
+        this.lock,
       );
     }
     return this.engine;

@@ -25,6 +25,7 @@ import {
   respaceWith,
   splitPageTexts,
 } from "./convert";
+import { Mutex } from "./mutex";
 import {
   migrateImportedPageNotes,
   notesFingerprint,
@@ -75,32 +76,30 @@ export interface SyncReport {
 export type Progress = (text: string, fraction?: number) => void;
 
 export class SyncEngine {
-  private running?: Promise<SyncReport>;
-
   constructor(
     private cloud: RemarkableCloud,
     private state: SyncStateStore,
     private settings: () => SyncSettings,
     /** Stable uuid of this installation (CRDT author on the tablet). */
     private authorId: string,
+    /**
+     * Serialises sync, remove and removeImported (one at a time). Share one
+     * instance between engines that use the same state store, so replacing
+     * the engine (connect/disconnect) cannot overlap a running operation.
+     */
+    private lock: Mutex = new Mutex(),
   ) {}
 
   get busy() {
-    return !!this.running;
+    return this.lock.locked;
   }
 
   /** Runs one sync at a time; overlapping calls wait for the current one. */
-  async sync(
+  sync(
     attachments: Zotero.Item[],
     progress: Progress = () => {},
   ): Promise<SyncReport> {
-    while (this.running) await this.running.catch(() => {});
-    this.running = this.doSync(attachments, progress);
-    try {
-      return await this.running;
-    } finally {
-      this.running = undefined;
-    }
+    return this.lock.run(() => this.doSync(attachments, progress));
   }
 
   /** Attachments that are tracked in the sync state. */
@@ -428,7 +427,11 @@ export class SyncEngine {
   }
 
   /** Delete the document from the tablet (to trash) and forget it. */
-  async remove(att: Zotero.Item) {
+  remove(att: Zotero.Item): Promise<boolean> {
+    return this.lock.run(() => this.doRemove(att));
+  }
+
+  private async doRemove(att: Zotero.Item) {
     await this.state.load();
     const doc = this.state.get(att.libraryID, att.key);
     if (!doc) return false;
@@ -445,7 +448,11 @@ export class SyncEngine {
    * With `reimport`, they are pulled again on the next sync; otherwise they
    * stay deleted (like deleting them by hand).
    */
-  async removeImported(atts: Zotero.Item[], reimport = false) {
+  removeImported(atts: Zotero.Item[], reimport = false): Promise<number> {
+    return this.lock.run(() => this.doRemoveImported(atts, reimport));
+  }
+
+  private async doRemoveImported(atts: Zotero.Item[], reimport: boolean) {
     await this.state.load();
     let n = 0;
     for (const att of atts) {
