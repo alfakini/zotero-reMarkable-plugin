@@ -48,6 +48,8 @@ export interface DocState {
   pullIncomplete?: boolean;
   /** Fingerprint of the Zotero annotations burned into the uploaded PDF. */
   uploadedFingerprint?: string;
+  /** Title last pushed to the tablet; a change renames the document. */
+  pushedTitle?: string;
   originalPageCount: number;
   appendedPageCount: number;
   /** Original PDF page boxes (CropBox) used for coordinate mapping. */

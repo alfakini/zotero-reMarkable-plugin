@@ -73,6 +73,7 @@ test("the new document id is on disk before the root commit, and the next sync a
   const doc = diskState(io).docs[KEY];
   assert.equal(doc.rmDocId, rmDocId);
   assert.ok(doc.uploadedFingerprint, "fingerprint recorded once replaced");
+  assert.equal(doc.pushedTitle, "Paper");
 });
 
 test("a successful upload records the id the tablet received", async () => {
@@ -89,6 +90,52 @@ test("a successful upload records the id the tablet received", async () => {
   const again = await (await boot()).engine.sync([att]);
   assert.equal(again.uploaded + again.updated, 0);
   assert.equal(tablet.calls.length, 1);
+});
+
+test("a title change with an unchanged PDF only renames the tablet document", async () => {
+  const { io, tablet, title, att, boot } = await setup();
+  await (await boot()).engine.sync([att]);
+  const [rmDocId] = [...tablet.docs.keys()];
+  assert.equal(tablet.docs.get(rmDocId)?.name, "Paper");
+  const pdfBefore = tablet.docs.get(rmDocId)?.pdf;
+
+  title.value = "Paper (renamed)";
+  const { state, engine } = await boot();
+  const report = await engine.sync([att]);
+  assert.deepEqual(report.errors, []);
+  assert.equal(report.uploaded + report.updated, 0);
+  assert.equal(tablet.count("upload:"), 1);
+  assert.equal(tablet.count("replace:"), 0);
+  assert.equal(tablet.count("rename:"), 1);
+  assert.equal(tablet.docs.get(rmDocId)?.name, "Paper (renamed)");
+  assert.equal(tablet.docs.get(rmDocId)?.pdf, pdfBefore, "PDF untouched");
+  const doc = state.get(LIB, ATT);
+  assert.equal(doc?.pushedTitle, "Paper (renamed)");
+  // The hash advanced with the rename, so the next sync does not pull.
+  assert.equal(doc?.rmDocHash, tablet.docs.get(rmDocId)?.hash);
+  assert.equal(diskState(io).docs[KEY].pushedTitle, "Paper (renamed)");
+
+  const again = await (await boot()).engine.sync([att]);
+  assert.equal(again.uploaded + again.updated, 0);
+  assert.equal(tablet.count("rename:"), 1, "renamed only once");
+});
+
+test("without a recorded title only the title is recorded; the tablet name is kept", async () => {
+  const { io, tablet, title, att, boot } = await setup();
+  await (await boot()).engine.sync([att]);
+  const [rmDocId] = [...tablet.docs.keys()];
+  // Synced before pushedTitle existed, then renamed on the tablet.
+  const disk = diskState(io);
+  delete disk.docs[KEY].pushedTitle;
+  io.files.set(STATE_PATH, JSON.stringify(disk));
+  tablet.docs.get(rmDocId)!.name = "Renamed on tablet";
+
+  title.value = "Paper (new)";
+  const { state, engine } = await boot();
+  await engine.sync([att]);
+  assert.equal(tablet.count("rename:"), 0);
+  assert.equal(tablet.docs.get(rmDocId)?.name, "Renamed on tablet");
+  assert.equal(state.get(LIB, ATT)?.pushedTitle, "Paper (new)");
 });
 
 test("a changed page count uploads a new document under a persisted id and trashes the old one", async () => {

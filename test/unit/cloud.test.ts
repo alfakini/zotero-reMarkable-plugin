@@ -10,6 +10,7 @@ import {
   serializeIndex,
 } from "../../src/remarkable/cloud";
 import { sha256Hex } from "../../src/remarkable/hash";
+import { titleToPush } from "../../src/sync/titlePush";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -174,6 +175,59 @@ test("replacePdf without conflict replaces only the pdf, metadata and content", 
   assert.equal(fake.fileText(ID, `${ID}/p1.rm`), "strokes-v1");
   assert.equal(fake.rootPuts, 1);
   assert.ok(fake.rootEntries().some((e) => e.id === OTHER));
+});
+
+test("replacePdf renames the document only when a name is given", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.cloud().replacePdf(ID, enc.encode("new-pdf"), 1);
+  assert.equal(
+    JSON.parse(fake.fileText(ID, `${ID}.metadata`)).visibleName,
+    "Paper",
+  );
+  await fake.cloud().replacePdf(ID, enc.encode("newer-pdf"), 1, "Renamed");
+  const meta = JSON.parse(fake.fileText(ID, `${ID}.metadata`));
+  assert.equal(meta.visibleName, "Renamed");
+  assert.equal(meta.type, "DocumentType");
+  assert.equal(fake.fileText(ID, `${ID}/p1.rm`), "strokes-v1");
+});
+
+test("renameDocument updates only the metadata, and only when the name differs", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const before = fake.rootEntries().find((e) => e.id === ID)?.hash;
+  const noop = await fake.cloud().renameDocument(ID, "Paper");
+  assert.equal(noop.baseHash, before);
+  assert.equal(noop.hash, before);
+  assert.equal(fake.rootPuts, 0);
+  assert.equal(fake.rootEntries().find((e) => e.id === ID)?.hash, before);
+
+  const pdfPuts = fake.puts.filter((p) => p.filename === `${ID}.pdf`).length;
+  const renamed = await fake.cloud().renameDocument(ID, "New title");
+  assert.equal(renamed.baseHash, before);
+  assert.equal(renamed.hash, fake.rootEntries().find((e) => e.id === ID)?.hash);
+  assert.notEqual(renamed.hash, before);
+  assert.equal(fake.rootPuts, 1);
+  assert.equal(
+    JSON.parse(fake.fileText(ID, `${ID}.metadata`)).visibleName,
+    "New title",
+  );
+  assert.equal(fake.fileText(ID, `${ID}.pdf`), "old-pdf");
+  assert.equal(fake.fileText(ID, `${ID}/p1.rm`), "strokes-v1");
+  assert.equal(
+    fake.puts.filter((p) => p.filename === `${ID}.pdf`).length,
+    pdfPuts,
+  );
+  assert.ok(fake.rootEntries().some((e) => e.id === OTHER));
+});
+
+test("renameDocument on a missing document throws 404", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await assert.rejects(
+    fake.cloud().renameDocument("33333333-3333-4333-8333-333333333333", "x"),
+    (e: unknown) => e instanceof RemarkableError && e.status === 404,
+  );
 });
 
 test("conflict: a change the tablet made to the same document survives", async () => {
@@ -643,6 +697,52 @@ test("pairDevice does not validate or store when registration fails", async () =
     /bad code/,
   );
   assert.equal(touched, false);
+});
+
+// Mirrors SyncEngine.push: the title handed to replacePdf comes from
+// titleToPush, so only a Zotero-side title change can rename the document.
+async function rebuild(
+  fake: FakeCloud,
+  pushedTitle: string | undefined,
+  title: string,
+) {
+  await fake
+    .cloud()
+    .replacePdf(ID, enc.encode("rebuilt"), 1, titleToPush(pushedTitle, title));
+}
+const tabletName = (fake: FakeCloud) =>
+  JSON.parse(fake.fileText(ID, `${ID}.metadata`)).visibleName;
+
+test("titleToPush only returns a title that changed since the last push", () => {
+  assert.equal(titleToPush("A", "A"), undefined);
+  assert.equal(titleToPush("A", "B"), "B");
+  // Synced before pushedTitle existed: never rename.
+  assert.equal(titleToPush(undefined, "B"), undefined);
+});
+
+test("a PDF rebuild keeps a tablet-side rename while the Zotero title is unchanged", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.cloud().renameDocument(ID, "Renamed on tablet");
+  await rebuild(fake, "Paper", "Paper");
+  assert.equal(tabletName(fake), "Renamed on tablet");
+  assert.equal(fake.fileText(ID, `${ID}.pdf`), "rebuilt");
+});
+
+test("a PDF rebuild renames the document after the Zotero title changed", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.cloud().renameDocument(ID, "Renamed on tablet");
+  await rebuild(fake, "Paper", "New Zotero title");
+  assert.equal(tabletName(fake), "New Zotero title");
+});
+
+test("a PDF rebuild without a recorded title does not overwrite the tablet name", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.cloud().renameDocument(ID, "Renamed on tablet");
+  await rebuild(fake, undefined, "Zotero title");
+  assert.equal(tabletName(fake), "Renamed on tablet");
 });
 
 test("getPageIds shows whether an updateDocument whose response was lost landed", async () => {

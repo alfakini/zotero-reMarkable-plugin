@@ -66,11 +66,34 @@ export interface ChangedDocument {
   baseHash: string;
 }
 
-/** Computes the files to change from a document's current file entries. */
-type DocumentBuilder = (ctx: {
+type DocumentContext = {
   files: IndexEntry[];
   readText: (entry: IndexEntry) => Promise<string>;
-}) => Promise<FileUpdate[] | undefined> | FileUpdate[] | undefined;
+};
+
+/** Computes the files to change from a document's current file entries. */
+type DocumentBuilder = (
+  ctx: DocumentContext,
+) => Promise<FileUpdate[] | undefined> | FileUpdate[] | undefined;
+
+/**
+ * Rewrites a document's `.metadata` from the entries in `cur`. `mutate` edits
+ * the parsed metadata in place and returns false for "no change"; otherwise
+ * `lastModified` is bumped. Undefined when there is no metadata entry or
+ * nothing changed.
+ */
+async function patchMetadata(
+  id: string,
+  cur: DocumentContext,
+  mutate: (metadata: RmMetadata) => boolean,
+): Promise<FileUpdate | undefined> {
+  const entry = cur.files.find((f) => f.id === `${id}.metadata`);
+  if (!entry) return undefined;
+  const metadata = JSON.parse(await cur.readText(entry)) as RmMetadata;
+  if (mutate(metadata) === false) return undefined;
+  metadata.lastModified = String(Date.now());
+  return { name: `${id}.metadata`, data: JSON.stringify(metadata) };
+}
 
 /** A library entry whose metadata cannot be used; listItems skips it. */
 class UnreadableEntry extends Error {}
@@ -655,32 +678,27 @@ export class RemarkableCloud {
 
   /**
    * Replace the PDF of an existing document, keeping its .rm annotation files
-   * and page mapping. The new PDF must keep the original page order.
+   * and page mapping. The new PDF must keep the original page order. When
+   * `name` is given and differs from the current one, the document is renamed.
    * Returns the new document hash and the hash of the entry it was merged onto.
    */
   async replacePdf(
     id: string,
     pdf: Uint8Array,
     pageCount: number,
+    name?: string,
   ): Promise<ChangedDocument> {
-    const docEntry = await this.findDocument(id);
-    if (!docEntry) throw new RemarkableError(`Document ${id} not found`, 404);
-    const files = await this.getDocEntries(docEntry);
-    return this.changeDocument(id, docEntry, files, async (cur) => {
+    const doc = await this.openDocument(id);
+    if (!doc) throw new RemarkableError(`Document ${id} not found`, 404);
+    return this.changeDocument(id, doc.entry, doc.files, async (cur) => {
       // Derived from the entries the build is given, so after a conflict the
       // pages and metadata the tablet changed meanwhile are kept.
       const updates: FileUpdate[] = [{ name: `${id}.pdf`, data: pdf }];
-      const metaEntry = cur.files.find((f) => f.id === `${id}.metadata`);
-      if (metaEntry) {
-        const metadata = JSON.parse(
-          await cur.readText(metaEntry),
-        ) as RmMetadata;
-        metadata.lastModified = String(Date.now());
-        updates.push({
-          name: `${id}.metadata`,
-          data: JSON.stringify(metadata),
-        });
-      }
+      const meta = await patchMetadata(id, cur, (metadata) => {
+        if (name !== undefined) metadata.visibleName = name;
+        return true;
+      });
+      if (meta) updates.push(meta);
       const contentEntry = cur.files.find((f) => f.id === `${id}.content`);
       const oldContent = contentEntry
         ? JSON.parse(await cur.readText(contentEntry))
@@ -694,6 +712,25 @@ export class RemarkableCloud {
       );
       updates.push({ name: `${id}.content`, data: JSON.stringify(content) });
       return updates;
+    });
+  }
+
+  /**
+   * Rename a document without touching anything else. Does nothing when the
+   * name is already `name` or the document has no readable metadata.
+   * `baseHash` is the hash of the entry the rename was merged onto, `hash` the
+   * document hash afterwards (equal to `baseHash` when nothing changed).
+   */
+  async renameDocument(id: string, name: string): Promise<ChangedDocument> {
+    const doc = await this.openDocument(id);
+    if (!doc) throw new RemarkableError(`Document ${id} not found`, 404);
+    return this.changeDocument(id, doc.entry, doc.files, async (cur) => {
+      const update = await patchMetadata(id, cur, (metadata) => {
+        if (metadata.visibleName === name) return false;
+        metadata.visibleName = name;
+        return true;
+      });
+      return update && [update];
     });
   }
 
@@ -742,20 +779,18 @@ export class RemarkableCloud {
 
   /** Move a document to the trash (the tablet then deletes it). */
   async trashDocument(id: string) {
-    const docEntry = await this.findDocument(id);
-    if (!docEntry) return;
-    const files = await this.getDocEntries(docEntry);
+    const doc = await this.openDocument(id);
+    if (!doc) return;
     await this.changeDocument(
       id,
-      docEntry,
-      files,
+      doc.entry,
+      doc.files,
       async (cur) => {
-        const entry = cur.files.find((f) => f.id === `${id}.metadata`);
-        if (!entry) return undefined;
-        const metadata = JSON.parse(await cur.readText(entry));
-        metadata.parent = "trash";
-        metadata.lastModified = String(Date.now());
-        return [{ name: `${id}.metadata`, data: JSON.stringify(metadata) }];
+        const update = await patchMetadata(id, cur, (metadata) => {
+          metadata.parent = "trash";
+          return true;
+        });
+        return update && [update];
       },
       { ifMissing: "skip" },
     );
