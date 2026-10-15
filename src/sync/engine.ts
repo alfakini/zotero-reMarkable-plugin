@@ -18,9 +18,12 @@ import { uuid4 } from "../remarkable/hash";
 import { parseRm } from "../remarkable/rmscene";
 import {
   CONVERTER_VERSION,
+  type PageIndex,
+  buildPageIndex,
   convertPages,
   fingerprint,
-  respace,
+  respaceWith,
+  splitPageTexts,
 } from "./convert";
 import {
   migrateImportedPageNotes,
@@ -315,12 +318,18 @@ export class SyncEngine {
     // Restore word spacing in highlighted text from Zotero's text extraction.
     if (candidates.some((c) => c.kind === "annotation" && c.json.text)) {
       const pageTexts = await pageTextsOf(att);
+      // Built lazily and shared by all highlights on the same page.
+      const indexes = new Map<number, PageIndex>();
       for (const c of candidates) {
         if (c.kind === "annotation" && c.json.text) {
-          c.json.text = respace(
-            c.json.text,
-            pageTexts[c.json.position.pageIndex],
-          );
+          const pageIndex = c.json.position.pageIndex;
+          const pageText = pageTexts[pageIndex];
+          let index = indexes.get(pageIndex);
+          if (!index && pageText) {
+            index = buildPageIndex(pageText);
+            indexes.set(pageIndex, index);
+          }
+          c.json.text = respaceWith(c.json.text, pageText, index);
         }
       }
     }
@@ -450,7 +459,7 @@ export class SyncEngine {
 async function pageTextsOf(att: Zotero.Item): Promise<string[]> {
   try {
     const res = await Zotero.PDFWorker.getFullText(att.id, null, true);
-    return (res?.text ?? "").split("\f");
+    return splitPageTexts(res?.text, res?.totalPages);
   } catch (e) {
     Zotero.debug(`[reMarkable] full text unavailable: ${(e as Error).message}`);
     return [];
