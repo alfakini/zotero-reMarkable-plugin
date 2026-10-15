@@ -1,5 +1,6 @@
 /** Zotero-side helpers: read Zotero data and write imported annotations. */
 import type { AnnotationCandidate, NoteCandidate } from "./convert";
+import { fitInkPosition } from "./inkFit";
 import { isSyncedNoteTitle, paragraphsToHtml } from "./notes";
 import type { RmParagraph } from "../remarkable/rmscene";
 import type { DocState } from "./state";
@@ -7,7 +8,6 @@ import type { ZAnnotation, ZNote } from "./types";
 
 export const IMPORT_TAG = "reMarkable";
 const AUTHOR = "reMarkable";
-const POSITION_MAX = 65000;
 
 /** PDF attachments for a mix of regular items and attachments. */
 export async function pdfAttachments(
@@ -129,38 +129,27 @@ export function knownPageLabels(attachment: Zotero.Item): string[] {
   return labels;
 }
 
-/** Thin out ink paths until the position fits Zotero's size limit. */
-function fitPosition(position: any) {
-  let pos = position;
-  let step = 2;
-  while (JSON.stringify(pos).length > POSITION_MAX && step < 64) {
-    pos = {
-      ...pos,
-      paths: (position.paths as number[][]).map((p) => {
-        const out: number[] = [];
-        for (let i = 0; i < p.length; i += 2 * step) out.push(p[i], p[i + 1]);
-        out.push(p[p.length - 2], p[p.length - 1]);
-        return out;
-      }),
-    };
-    step *= 2;
-  }
-  return pos;
-}
-
 export async function saveAnnotation(
   attachment: Zotero.Item,
   c: AnnotationCandidate,
   key?: string,
 ): Promise<string> {
+  let position = c.json.position;
+  if (c.json.type === "ink") {
+    const fitted = fitInkPosition(c.json.position as any);
+    position = fitted.position as any;
+    if (fitted.droppedPaths)
+      Zotero.debug(
+        `[reMarkable] ink ${c.rmKey} too large: dropped ${fitted.droppedPaths} stroke(s)`,
+      );
+  }
   const json: any = {
     key: key ?? (Zotero as any).DataObjectUtilities.generateKey(),
     type: c.json.type,
     color: c.json.color,
     pageLabel: c.json.pageLabel,
     sortIndex: c.json.sortIndex,
-    position:
-      c.json.type === "ink" ? fitPosition(c.json.position) : c.json.position,
+    position,
     comment: c.json.comment ?? "",
     authorName: AUTHOR,
     tags: [{ name: IMPORT_TAG }],
@@ -180,12 +169,16 @@ export async function saveNote(
   c: NoteCandidate,
   existingKey?: string,
 ): Promise<string> {
-  const parentID = attachment.parentID ?? attachment.id;
+  // A note cannot be a child of an attachment; callers skip these candidates.
+  const parentID = attachment.parentID;
+  if (!parentID)
+    throw new Error("cannot create a note under a standalone attachment");
   let note = existingKey
     ? (Zotero.Items.getByLibraryAndKey(attachment.libraryID, existingKey) as
         | Zotero.Item
         | false)
     : false;
+  let created = false;
   if (!note) {
     note = new Zotero.Item("note");
     note.libraryID = attachment.libraryID;
@@ -194,6 +187,7 @@ export async function saveNote(
       `<div data-schema-version="9"><h1>${escapeHtml(c.title)}</h1></div>`,
     );
     await note.saveTx();
+    created = true;
   } else {
     // Drop images from the previous version of this note.
     for (const id of note.getAttachments()) {
@@ -201,23 +195,30 @@ export async function saveNote(
       if (img) await img.eraseTx();
     }
   }
-  let body = `<h1>${escapeHtml(c.title)}</h1>`;
-  if (c.svg) {
-    const img = await Zotero.Attachments.importEmbeddedImage({
-      blob: new Blob([c.svg.markup], { type: "image/svg+xml" }),
-      parentItemID: note.id,
-    });
-    body += `<p><img data-attachment-key="${img.key}" width="${c.svg.width}" height="${c.svg.height}"/></p>`;
+  try {
+    let body = `<h1>${escapeHtml(c.title)}</h1>`;
+    if (c.svg) {
+      const img = await Zotero.Attachments.importEmbeddedImage({
+        blob: new Blob([c.svg.markup], { type: "image/svg+xml" }),
+        parentItemID: note.id,
+      });
+      body += `<p><img data-attachment-key="${img.key}" width="${c.svg.width}" height="${c.svg.height}"/></p>`;
+    }
+    if (c.text) {
+      body += c.text
+        .split(/\n{2,}/)
+        .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
+        .join("");
+    }
+    note.setNote(`<div data-schema-version="9">${body}</div>`);
+    note.addTag(IMPORT_TAG);
+    await note.saveTx();
+  } catch (e) {
+    // A half-built note we just created is not recorded in the state, so
+    // remove it; otherwise the retry on the next sync would duplicate it.
+    if (created) await note.eraseTx().catch(() => {});
+    throw e;
   }
-  if (c.text) {
-    body += c.text
-      .split(/\n{2,}/)
-      .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
-      .join("");
-  }
-  note.setNote(`<div data-schema-version="9">${body}</div>`);
-  note.addTag(IMPORT_TAG);
-  await note.saveTx();
   return note.key;
 }
 

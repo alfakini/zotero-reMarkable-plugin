@@ -27,7 +27,14 @@ import {
   syncNotes,
 } from "./noteSync";
 import { buildRemarkablePdf } from "./pdfExport";
-import { keysToErase, readPages } from "./pullPlan";
+import {
+  canSaveCandidate,
+  type CandidateFailure,
+  formatCandidateFailures,
+  keysToErase,
+  needsPull,
+  readPages,
+} from "./pullPlan";
 import type { SyncStateStore, DocState } from "./state";
 import {
   eraseByKey,
@@ -133,10 +140,7 @@ export class SyncEngine {
         // older versions imported one-way from notebook pages.
         if (doc && att.parentID) migrateImportedPageNotes(doc);
         const tabletChanged =
-          !!doc &&
-          !!entry &&
-          (doc.rmDocHash !== entry.hash ||
-            doc.converterVersion !== CONVERTER_VERSION);
+          !!doc && !!entry && needsPull(doc, entry.hash, CONVERTER_VERSION);
         if (doc && entry && tabletChanged) {
           await this.pull(att, doc, entry, report);
         }
@@ -284,21 +288,45 @@ export class SyncEngine {
 
     const seen = new Set<string>();
     let savedImages = false;
+    // Each candidate is saved in isolation: one that cannot be saved is
+    // recorded and retried on the next sync without blocking the others.
+    const failures: CandidateFailure[] = [];
     for (const c of candidates) {
+      // Always "seen", so a skipped or failed one never erases an old import.
       seen.add(c.rmKey);
+      if (!canSaveCandidate(c.kind, !!att.parentID)) {
+        Zotero.debug(
+          `[reMarkable] skipping note ${c.rmKey}: standalone attachment has no parent item`,
+        );
+        continue;
+      }
       const rec = doc.imported[c.rmKey];
       if (rec) {
         // Unchanged, or deleted by the user in Zotero: leave it alone.
         if (rec.hash === c.hash || !existsByKey(att.libraryID, rec.zoteroKey))
           continue;
       }
-      const key =
-        c.kind === "annotation"
-          ? await saveAnnotation(att, c, rec?.zoteroKey)
-          : await saveNote(att, c, rec?.zoteroKey);
-      doc.imported[c.rmKey] = { zoteroKey: key, hash: c.hash, kind: c.kind };
-      if (c.kind === "annotation" && c.json.type === "ink") savedImages = true;
-      report.imported++;
+      try {
+        const key =
+          c.kind === "annotation"
+            ? await saveAnnotation(att, c, rec?.zoteroKey)
+            : await saveNote(att, c, rec?.zoteroKey);
+        doc.imported[c.rmKey] = { zoteroKey: key, hash: c.hash, kind: c.kind };
+        if (c.kind === "annotation" && c.json.type === "ink")
+          savedImages = true;
+        report.imported++;
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        Zotero.debug(
+          `[reMarkable] could not import ${c.rmKey}: ${e}\n${(e as Error)?.stack}`,
+        );
+        failures.push({ rmKey: c.rmKey, message });
+      }
+    }
+    if (failures.length) {
+      report.errors.push(
+        `${remarkableTitle(att)}: ${formatCandidateFailures(failures, candidates.length)}`,
+      );
     }
     // Erased on the tablet -> remove what we imported from it.
     for (const rmKey of keysToErase(
@@ -322,6 +350,9 @@ export class SyncEngine {
         Zotero.debug(`[reMarkable] preview render failed: ${e}`);
       }
     }
+    // Unsaved candidates are retried on the next sync (see needsPull); the
+    // saved ones are skipped by hash, so only the failed ones are redone.
+    doc.pullIncomplete = failures.length > 0 || undefined;
     doc.rmDocHash = entry.hash;
     doc.converterVersion = CONVERTER_VERSION;
     doc.lastSync = new Date().toISOString();

@@ -33,6 +33,12 @@ export interface DocState {
   converterVersion?: number;
   /** Hash of the reMarkable document entry when we last synced. */
   rmDocHash?: string;
+  /**
+   * Set when the last pull could not save every candidate. The next sync
+   * pulls again (saved ones are skipped by hash) even if the tablet copy is
+   * unchanged, because push may advance `rmDocHash` in between.
+   */
+  pullIncomplete?: boolean;
   /** Fingerprint of the Zotero annotations burned into the uploaded PDF. */
   uploadedFingerprint?: string;
   originalPageCount: number;

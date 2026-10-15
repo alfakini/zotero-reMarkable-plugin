@@ -62,3 +62,58 @@ export function keysToErase(
   }
   return out;
 }
+
+/**
+ * Note candidates (margin notes, notebook pages) become child notes, which
+ * Zotero only allows under a regular item. For a standalone PDF attachment
+ * they are skipped.
+ */
+export function canSaveCandidate(
+  kind: "annotation" | "note",
+  attachmentHasParent: boolean,
+): boolean {
+  return kind === "annotation" || attachmentHasParent;
+}
+
+export interface CandidateFailure {
+  rmKey: string;
+  message: string;
+}
+
+/**
+ * One readable report line for the candidates that could not be saved. Lists
+ * at most `max` of them so a page full of failures does not flood the UI.
+ */
+export function formatCandidateFailures(
+  failures: readonly CandidateFailure[],
+  total: number,
+  max = 3,
+): string {
+  const shown = failures
+    .slice(0, max)
+    .map((f) => `${f.rmKey}: ${f.message}`)
+    .join("; ");
+  const more =
+    failures.length > max ? `; and ${failures.length - max} more` : "";
+  return `could not import ${failures.length} of ${total} items (${shown}${more}); will retry on the next sync`;
+}
+
+/**
+ * Whether the tablet copy must be pulled: it changed, the converter changed,
+ * or the previous pull left candidates unsaved.
+ */
+export function needsPull(
+  doc: {
+    rmDocHash?: string;
+    converterVersion?: number;
+    pullIncomplete?: boolean;
+  },
+  entryHash: string,
+  converterVersion: number,
+): boolean {
+  return (
+    doc.rmDocHash !== entryHash ||
+    doc.converterVersion !== converterVersion ||
+    !!doc.pullIncomplete
+  );
+}

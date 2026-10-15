@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { keysToErase, readPages } from "../../src/sync/pullPlan";
+import {
+  canSaveCandidate,
+  formatCandidateFailures,
+  keysToErase,
+  needsPull,
+  readPages,
+} from "../../src/sync/pullPlan";
 
 const imported = {
   "p1/g/a": { kind: "annotation" as const },
@@ -46,6 +52,35 @@ test("does not match page ids that merely share a prefix", () => {
     true,
   );
   assert.deepEqual(out, ["p10/g/x"]);
+});
+
+test("note candidates are skipped for standalone attachments", () => {
+  assert.equal(canSaveCandidate("note", false), false);
+  assert.equal(canSaveCandidate("note", true), true);
+  assert.equal(canSaveCandidate("annotation", false), true);
+  assert.equal(canSaveCandidate("annotation", true), true);
+});
+
+test("formats and truncates candidate failures", () => {
+  const f = Array.from({ length: 5 }, (_, i) => ({
+    rmKey: `p${i}/i/x`,
+    message: `boom ${i}`,
+  }));
+  const text = formatCandidateFailures(f, 12);
+  assert.match(text, /could not import 5 of 12 items/);
+  assert.match(text, /p0\/i\/x: boom 0/);
+  assert.match(text, /p2\/i\/x: boom 2/);
+  assert.doesNotMatch(text, /p3\/i\/x/);
+  assert.match(text, /and 2 more/);
+  assert.doesNotMatch(formatCandidateFailures(f.slice(0, 1), 1), /more/);
+});
+
+test("pull is needed when the previous pull was incomplete", () => {
+  const doc = { rmDocHash: "h", converterVersion: 3 };
+  assert.equal(needsPull(doc, "h", 3), false);
+  assert.equal(needsPull(doc, "other", 3), true);
+  assert.equal(needsPull(doc, "h", 4), true);
+  assert.equal(needsPull({ ...doc, pullIncomplete: true }, "h", 3), true);
 });
 
 test("a page without an .rm blob is empty, not unreadable", () => {
