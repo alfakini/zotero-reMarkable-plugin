@@ -433,6 +433,69 @@ test("document removed during a conflict is not resurrected", async () => {
   assert.ok(!fake.rootEntries().some((e) => e.id === ID));
 });
 
+test("uploadPdf uses a pre-generated id for every file of the document", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const NEW = "44444444-4444-4444-8444-444444444444";
+  const uploaded = await fake
+    .cloud()
+    .uploadPdf("Fresh", enc.encode("fresh-pdf"), 3, "", NEW);
+  assert.equal(uploaded.id, NEW);
+  assert.equal(
+    uploaded.hash,
+    fake.rootEntries().find((e) => e.id === NEW)?.hash,
+    "hash is that of the committed root entry",
+  );
+  assert.equal(fake.fileText(NEW, `${NEW}.pdf`), "fresh-pdf");
+  assert.equal(
+    JSON.parse(fake.fileText(NEW, `${NEW}.metadata`)).visibleName,
+    "Fresh",
+  );
+});
+
+test("uploadPdf generates an id when none is given", async () => {
+  const fake = new FakeCloud();
+  const { id } = await fake.cloud().uploadPdf("Fresh", enc.encode("pdf"), 1);
+  assert.match(id, /^[0-9a-f-]{36}$/);
+  assert.equal(fake.fileText(id, `${id}.pdf`), "pdf");
+});
+
+test("lost root response: the upload is not retried and sits under the pre-generated id", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const NEW = "44444444-4444-4444-8444-444444444444";
+  fake.loseRootResponse = true;
+  await assert.rejects(
+    fake.cloud().uploadPdf("Fresh", enc.encode("fresh-pdf"), 1, "", NEW),
+    TypeError,
+  );
+  // The server applied the commit exactly once; the caller, which recorded
+  // NEW before calling, can find the entry on its next sync and adopt it
+  // instead of uploading a second copy.
+  assert.equal(fake.rootPuts, 1);
+  const copies = fake.rootEntries().filter((e) => {
+    const files = parseIndex(fake.text(e.hash)).entries;
+    return files.some((f) => f.id.endsWith(".pdf"));
+  });
+  assert.equal(copies.filter((e) => e.id === NEW).length, 1);
+  assert.equal(copies.length, 2);
+});
+
+test("lost root response: replacePdf then updates the adopted document", async () => {
+  const fake = new FakeCloud();
+  const NEW = "44444444-4444-4444-8444-444444444444";
+  fake.loseRootResponse = true;
+  await assert.rejects(
+    fake.cloud().uploadPdf("Fresh", enc.encode("first"), 1, "", NEW),
+  );
+  fake.loseRootResponse = false;
+  const cloud = fake.cloud();
+  assert.ok(await cloud.findDocument(NEW), "entry is present in the root");
+  await cloud.replacePdf(NEW, enc.encode("second"), 1);
+  assert.equal(fake.fileText(NEW, `${NEW}.pdf`), "second");
+  assert.equal(fake.rootEntries().length, 1);
+});
+
 test("getPageIds shows whether an updateDocument whose response was lost landed", async () => {
   const fake = new FakeCloud();
   await seed(fake);

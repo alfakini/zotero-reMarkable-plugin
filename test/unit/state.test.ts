@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { buildDetachedList, skipKeys } from "../../src/sync/detached";
 import {
   type DocState,
   type StateFileIO,
@@ -285,6 +286,37 @@ test("removeDetached drops erased keys and prunes empty entries", async () => {
   assert.deepEqual(s.getDetached(1, "AAAA"), []);
   await s.save();
   assert.equal("detached" in JSON.parse(io.files.get(PATH)!), false);
+});
+
+test("a pending upload forgotten before a failing push keeps its keys excluded", async () => {
+  const io = memoryIO();
+  const first = new SyncStateStore(PATH, io);
+  await first.load();
+  // Pending upload recorded by push() (no uploadedFingerprint, no root entry).
+  first.set({
+    ...withImports("AAAA", "ANNOA", "NOTEB"),
+    detachedImported: ["OLD1"],
+  });
+  // doSync: the root entry is missing, so the document is forgotten...
+  first.forget(1, "AAAA");
+  // ...and push() throws (missing PDF, IOUtils or build error) before it
+  // records the replacement; doSync's finally block still saves the state.
+  await first.save();
+
+  const second = new SyncStateStore(PATH, io);
+  await second.load();
+  assert.equal(second.get(1, "AAAA"), undefined);
+  const registry = second.getDetached(1, "AAAA");
+  const skip = skipKeys(second.get(1, "AAAA"), registry);
+  for (const k of ["ANNOA", "NOTEB", "OLD1"]) assert.ok(skip.has(k));
+  assert.equal(skip.has("USERKEY"), false);
+  // The next successful push derives the new document's detached list from
+  // the registry alone, with no local variable carried between syncs.
+  assert.deepEqual(buildDetachedList(undefined, registry).sort(), [
+    "ANNOA",
+    "NOTEB",
+    "OLD1",
+  ]);
 });
 
 test("concurrent loads share one read and do not clobber later changes", async () => {

@@ -543,14 +543,19 @@ export class RemarkableCloud {
     return id;
   }
 
-  /** Upload a new PDF document and return its id. */
+  /**
+   * Upload a new PDF document and return its id and the hash of the
+   * committed document entry. A caller that must record
+   * the id before the commit (the root PUT is never retried, so a lost
+   * response would otherwise orphan the upload) passes a pre-generated `id`.
+   */
   async uploadPdf(
     name: string,
     pdf: Uint8Array,
     pageCount: number,
     parent = "",
-  ): Promise<string> {
-    const id = uuid4();
+    id: string = uuid4(),
+  ): Promise<{ id: string; hash: string }> {
     const now = String(Date.now());
     const metadata = {
       visibleName: name,
@@ -575,7 +580,7 @@ export class RemarkableCloud {
       { name: `${id}.pagedata`, data: "\n" },
     ]);
     await this.commitDocument(entry);
-    return id;
+    return { id, hash: entry.hash };
   }
 
   /** Find a document's root entry, or undefined if it no longer exists. */
