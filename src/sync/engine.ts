@@ -14,7 +14,7 @@ import {
   type IndexEntry,
 } from "../remarkable/cloud";
 import { pageRefs } from "../remarkable/content";
-import { parseRm, type RmPage } from "../remarkable/rmscene";
+import { parseRm } from "../remarkable/rmscene";
 import {
   CONVERTER_VERSION,
   convertPages,
@@ -27,6 +27,7 @@ import {
   syncNotes,
 } from "./noteSync";
 import { buildRemarkablePdf } from "./pdfExport";
+import { keysToErase, readPages } from "./pullPlan";
 import type { SyncStateStore, DocState } from "./state";
 import {
   eraseByKey,
@@ -242,19 +243,18 @@ export class SyncEngine {
   ) {
     const files = await this.cloud.getDocumentFiles(doc.rmDocId, entry);
     if (!files) return;
-    const pages: { ref: ReturnType<typeof pageRefs>[number]; page: RmPage }[] =
-      [];
-    for (const ref of pageRefs(files.content)) {
-      const data = files.rm.get(ref.id);
-      if (!data) continue;
-      try {
-        pages.push({ ref, page: parseRm(data) });
-      } catch (e) {
+    // Pages whose .rm exists but fails to parse: their imported objects must
+    // not be erased. A page without an .rm blob is empty (the files come from
+    // the document index), so its imported objects are erased.
+    const { pages, unreadable } = readPages(
+      pageRefs(files.content),
+      files.rm,
+      parseRm,
+      (ref, e) =>
         Zotero.debug(
           `[reMarkable] skipping page ${ref.id}: ${(e as Error).message}`,
-        );
-      }
-    }
+        ),
+    );
     let candidates = convertPages({
       pages,
       originalPageCount: doc.originalPageCount,
@@ -275,7 +275,8 @@ export class SyncEngine {
         }
       }
     }
-    if (!this.settings().importHandwriting) {
+    const importHandwriting = this.settings().importHandwriting;
+    if (!importHandwriting) {
       candidates = candidates.filter(
         (c) => c.kind === "annotation" && c.json.type !== "ink",
       );
@@ -300,8 +301,13 @@ export class SyncEngine {
       report.imported++;
     }
     // Erased on the tablet -> remove what we imported from it.
-    for (const [rmKey, rec] of Object.entries(doc.imported)) {
-      if (seen.has(rmKey)) continue;
+    for (const rmKey of keysToErase(
+      doc.imported,
+      seen,
+      unreadable,
+      importHandwriting,
+    )) {
+      const rec = doc.imported[rmKey];
       await eraseByKey(att.libraryID, rec.zoteroKey);
       delete doc.imported[rmKey];
       report.removed++;
