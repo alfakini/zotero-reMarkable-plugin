@@ -10,6 +10,7 @@ import {
   serializeIndex,
 } from "../../src/remarkable/cloud";
 import { sha256Hex } from "../../src/remarkable/hash";
+import { resolveFolderId } from "../../src/sync/folderCache";
 import { titleToPush } from "../../src/sync/titlePush";
 
 const enc = new TextEncoder();
@@ -92,8 +93,12 @@ class FakeCloud {
     this.generation++;
   }
 
+  /** Pathnames of every request, in order. */
+  requests: string[] = [];
+
   fetch = async (input: unknown, init: RequestInit = {}) => {
     const url = new URL(String(input));
+    this.requests.push(url.pathname);
     const method = init.method ?? "GET";
     const headers = (init.headers ?? {}) as Record<string, string>;
     const json = (o: unknown, status = 200) =>
@@ -616,6 +621,7 @@ test("ensureFolder throws on an unreadable entry instead of creating a duplicate
   assert.equal(await fake.cloud().ensureFolder("Zotero"), HIDDEN);
 });
 
+const FOLDER = "77777777-7777-4777-8777-777777777777";
 const folderMeta = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
     visibleName: "Zotero",
@@ -624,6 +630,126 @@ const folderMeta = (over: Record<string, unknown> = {}) =>
     lastModified: "1",
     ...over,
   });
+
+/** Resolve "Zotero" through the real cloud client and a cache holding FOLDER. */
+async function resolveCached(fake: FakeCloud, cached = FOLDER) {
+  const folders: Record<string, string> = { Zotero: cached };
+  const cache = {
+    getFolderId: (n: string) => folders[n],
+    setFolderId: (n: string, id: string) => {
+      folders[n] = id;
+    },
+  };
+  const cloud = fake.cloud();
+  const entries = new Map(
+    (await cloud.getRootEntries(await cloud.getRoot())).map(
+      (e) => [e.id, e] as const,
+    ),
+  );
+  const before = fake.requests.length;
+  const id = await resolveFolderId(
+    cache,
+    "Zotero",
+    entries,
+    (n) => cloud.ensureFolder(n),
+    (fid) => {
+      const e = entries.get(fid);
+      return e ? cloud.readMetadata(e) : Promise.resolve(undefined);
+    },
+  );
+  return { id, folders, requests: fake.requests.length - before };
+}
+
+test("resolveFolderId: a valid cached folder costs one docSchema and one metadata fetch, no listing", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.clientCommit(FOLDER, {
+    [`${FOLDER}.metadata`]: folderMeta(),
+    [`${FOLDER}.content`]: "{}",
+  });
+  const { id, requests } = await resolveCached(fake);
+  assert.equal(id, FOLDER);
+  assert.equal(requests, 2);
+  assert.equal(fake.rootPuts, 0);
+});
+
+for (const [label, over] of [
+  ["trashed", { parent: "trash" }],
+  ["moved into another folder", { parent: OTHER }],
+  ["renamed", { visibleName: "Renamed" }],
+  ["marked deleted", { deleted: true }],
+] as const) {
+  test(`resolveFolderId: a cached folder that was ${label} on the tablet is not reused`, async () => {
+    const fake = new FakeCloud();
+    await seed(fake);
+    await fake.clientCommit(FOLDER, {
+      [`${FOLDER}.metadata`]: folderMeta(over),
+      [`${FOLDER}.content`]: "{}",
+    });
+    const { id, folders } = await resolveCached(fake);
+    assert.notEqual(id, FOLDER);
+    assert.match(id, /^[0-9a-f-]{36}$/);
+    assert.equal(folders.Zotero, id);
+    const meta = JSON.parse(fake.fileText(id, `${id}.metadata`));
+    assert.equal(meta.visibleName, "Zotero");
+    assert.equal(meta.type, "CollectionType");
+    assert.equal(meta.parent, "");
+  });
+}
+
+test("resolveFolderId: a trashed cached folder falls back to an existing live folder of that name", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const LIVE = "99999999-9999-4999-8999-999999999999";
+  await fake.clientCommit(FOLDER, {
+    [`${FOLDER}.metadata`]: folderMeta({ parent: "trash" }),
+    [`${FOLDER}.content`]: "{}",
+  });
+  await fake.clientCommit(LIVE, {
+    [`${LIVE}.metadata`]: folderMeta(),
+    [`${LIVE}.content`]: "{}",
+  });
+  const { id, folders } = await resolveCached(fake);
+  assert.equal(id, LIVE);
+  assert.equal(folders.Zotero, LIVE);
+});
+
+test("resolveFolderId: a cached folder without readable metadata fails instead of creating a duplicate", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.clientCommit(FOLDER, { [`${FOLDER}.content`]: "{}" });
+  const before = fake.rootEntries().length;
+  await assert.rejects(() => resolveCached(fake), /unreadable library entry/);
+  assert.equal(fake.rootEntries().length, before, "no folder was created");
+});
+
+test("resolveFolderId: a cached id missing from the root falls back to ensureFolder", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  await fake.clientCommit(FOLDER, {
+    [`${FOLDER}.metadata`]: folderMeta(),
+    [`${FOLDER}.content`]: "{}",
+  });
+  const { id, folders } = await resolveCached(
+    fake,
+    "88888888-8888-4888-8888-888888888888",
+  );
+  assert.equal(id, FOLDER);
+  assert.equal(folders.Zotero, FOLDER);
+});
+
+test("resolveFolderId: no such folder at all creates and caches a new one", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const { id, folders } = await resolveCached(fake, "none");
+  assert.match(id, /^[0-9a-f-]{36}$/);
+  assert.equal(folders.Zotero, id);
+  assert.equal(
+    JSON.parse(fake.fileText(id, `${id}.metadata`)).visibleName,
+    "Zotero",
+  );
+});
+
 test("listItems still propagates auth errors", async () => {
   const fake = new FakeCloud();
   await seed(fake);
