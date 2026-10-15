@@ -496,6 +496,106 @@ test("lost root response: replacePdf then updates the adopted document", async (
   assert.equal(fake.rootEntries().length, 1);
 });
 
+const THIRD = "44444444-4444-4444-8444-444444444444";
+
+test("listItems skips entries with missing or invalid metadata", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  // No metadata file at all.
+  await fake.clientCommit(THIRD, { [`${THIRD}.content`]: "{}" });
+  // Metadata blob that is not JSON.
+  const BAD = "55555555-5555-4555-8555-555555555555";
+  await fake.clientCommit(BAD, { [`${BAD}.metadata`]: "not json{" });
+  // Metadata listed in the index but its blob is gone.
+  const GONE = "66666666-6666-4666-8666-666666666666";
+  await fake.clientCommit(GONE, { [`${GONE}.metadata`]: metadata("Gone") });
+  const goneMeta = fake
+    .docEntries(GONE)
+    .find((e) => e.id === `${GONE}.metadata`);
+  assert.ok(goneMeta);
+  fake.blobs.delete(goneMeta.hash);
+
+  const logs: string[] = [];
+  const cloud = new RemarkableCloud({
+    fetch: fake.fetch as unknown as typeof fetch,
+    deviceToken: "unused",
+    userToken: TOKEN,
+    log: (m) => logs.push(m),
+  });
+  const items = await cloud.listItems();
+  assert.deepEqual(items.map((i) => i.id).sort(), [ID, OTHER].sort());
+  for (const id of [THIRD, BAD, GONE]) {
+    assert.equal(
+      logs.filter((m) => m.includes(id)).length,
+      1,
+      `${id} is logged as skipped`,
+    );
+  }
+  assert.equal(logs.length, 3);
+});
+
+test("ensureFolder throws on an unreadable entry instead of creating a duplicate folder", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const HIDDEN = "88888888-8888-4888-8888-888888888888";
+  await fake.clientCommit(HIDDEN, {
+    [`${HIDDEN}.metadata`]: folderMeta(),
+    [`${HIDDEN}.content`]: "{}",
+  });
+  const hiddenMeta = fake
+    .docEntries(HIDDEN)
+    .find((e) => e.id === `${HIDDEN}.metadata`);
+  assert.ok(hiddenMeta);
+  fake.blobs.delete(hiddenMeta.hash);
+  const cloud = fake.cloud();
+
+  // Tolerant listing hides it; strict listing and ensureFolder refuse.
+  assert.ok(!(await cloud.listItems()).some((i) => i.id === HIDDEN));
+  await assert.rejects(() => cloud.listItems({ strict: true }), /88888888/);
+  const before = fake.rootEntries().length;
+  await assert.rejects(() => cloud.ensureFolder("Zotero"), /unreadable/);
+  assert.equal(fake.rootEntries().length, before, "no folder was created");
+
+  // Once the entry is readable again the existing folder is found.
+  fake.blobs.set(hiddenMeta.hash, enc.encode(folderMeta()));
+  assert.equal(await fake.cloud().ensureFolder("Zotero"), HIDDEN);
+});
+
+const folderMeta = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    visibleName: "Zotero",
+    type: "CollectionType",
+    parent: "",
+    lastModified: "1",
+    ...over,
+  });
+test("listItems still propagates auth errors", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const real = fake.fetch;
+  const cloud = new RemarkableCloud({
+    fetch: (async (input: unknown, init?: RequestInit) => {
+      const url = new URL(String(input));
+      // The root index is readable; every document blob is refused.
+      const blob = url.pathname.match(/^\/sync\/v3\/files\/(.+)$/)?.[1];
+      if (
+        url.pathname.startsWith("/token/") ||
+        (blob && blob !== fake.rootHash)
+      ) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      return real(input, init);
+    }) as unknown as typeof fetch,
+    deviceToken: "unused",
+    userToken: TOKEN,
+  });
+  // The 401 triggers a token refresh, which also answers 401 here.
+  await assert.rejects(
+    () => cloud.listItems(),
+    (e: unknown) => e instanceof RemarkableError && e.status === 401,
+  );
+});
+
 test("getPageIds shows whether an updateDocument whose response was lost landed", async () => {
   const fake = new FakeCloud();
   await seed(fake);

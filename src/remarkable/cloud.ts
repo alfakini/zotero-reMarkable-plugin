@@ -72,6 +72,9 @@ type DocumentBuilder = (ctx: {
   readText: (entry: IndexEntry) => Promise<string>;
 }) => Promise<FileUpdate[] | undefined> | FileUpdate[] | undefined;
 
+/** A library entry whose metadata cannot be used; listItems skips it. */
+class UnreadableEntry extends Error {}
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -113,6 +116,8 @@ export interface CloudOptions {
   syncHost?: string;
   /** Stable client uuid, recorded as CRDT author in .content files. */
   clientId?: string;
+  /** Diagnostics sink (Zotero.debug in the plugin); keeps this module Zotero-free. */
+  log?: (message: string) => void;
 }
 
 /** Exchange a one-time code (from CONNECT_URL) for a long-lived device token. */
@@ -491,31 +496,69 @@ export class RemarkableCloud {
     return { hash: committed, baseHash: mergedOn };
   }
 
-  /** List all documents and folders (excluding deleted ones). */
-  async listItems(concurrency = 3): Promise<RmItem[]> {
+  /**
+   * List all documents and folders (excluding deleted ones). An entry whose
+   * metadata is missing, unreadable or invalid is skipped (and logged)
+   * instead of failing the whole listing. Auth,
+   * rate-limit, server and network errors still propagate: they say nothing
+   * about one entry, and skipping would make it look absent. With `strict`,
+   * an unreadable entry throws instead, for callers that must not act on an
+   * incomplete listing (folder discovery would otherwise create a duplicate).
+   */
+  async listItems({
+    concurrency = 3,
+    strict = false,
+  }: {
+    concurrency?: number;
+    strict?: boolean;
+  } = {}): Promise<RmItem[]> {
     const root = await this.getRoot();
     const entries = await this.getRootEntries(root);
     const out: RmItem[] = [];
     await pool(entries, concurrency, async (entry) => {
       let item = this.metaCache.get(entry.hash);
       if (!item) {
-        const files = await this.getDocEntries(entry);
-        const meta = files.find((f) => f.id === `${entry.id}.metadata`);
-        if (!meta) return;
-        const metadata = JSON.parse(
-          await this.getText(meta.hash, meta.id),
-        ) as RmMetadata;
-        item = { id: entry.id, hash: entry.hash, metadata };
-        this.metaCache.set(entry.hash, item);
+        try {
+          const files = await this.getDocEntries(entry);
+          const meta = files.find((f) => f.id === `${entry.id}.metadata`);
+          if (!meta) throw new UnreadableEntry("no metadata file");
+          const metadata = JSON.parse(
+            await this.getText(meta.hash, meta.id),
+          ) as RmMetadata;
+          if (!metadata || typeof metadata !== "object") {
+            throw new UnreadableEntry("metadata is not an object");
+          }
+          item = { id: entry.id, hash: entry.hash, metadata };
+          this.metaCache.set(entry.hash, item);
+        } catch (e) {
+          if (
+            !(e instanceof UnreadableEntry) &&
+            !(e instanceof SyntaxError) &&
+            !(e instanceof RemarkableError && e.status === 404)
+          ) {
+            throw e;
+          }
+          const reason = e instanceof Error ? e.message : String(e);
+          if (strict) {
+            throw new Error(`unreadable library entry ${entry.id}: ${reason}`);
+          }
+          this.opts.log?.(`skipping unreadable entry ${entry.id}: ${reason}`);
+          return;
+        }
       }
       if (!item.metadata.deleted) out.push(item);
     });
     return out;
   }
 
-  /** Find (or create) a top-level folder with the given name. */
+  /**
+   * Find (or create) a top-level folder with the given name. The listing is
+   * strict: an unreadable entry could be the existing folder, so it throws
+   * rather than creating a duplicate. A caller-supplied `items` must come
+   * from a strict listing for the same reason.
+   */
   async ensureFolder(name: string, items?: RmItem[]): Promise<string> {
-    items ??= await this.listItems();
+    items ??= await this.listItems({ strict: true });
     const found = items.find(
       (i) =>
         i.metadata.type === "CollectionType" &&
