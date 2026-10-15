@@ -25,6 +25,7 @@ export class RemarkableService {
         fetch: fetch.bind(globalThis),
         deviceToken: getPref("deviceToken"),
         clientId: this.deviceId(),
+        log: (m) => Zotero.debug(`[reMarkable] ${m}`),
       });
       this.engine = new SyncEngine(
         cloud,
