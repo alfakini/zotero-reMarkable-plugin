@@ -8,6 +8,7 @@
  */
 import { buildPdfContent, pageRefs, reconcileContent } from "./content";
 import { crc32cHeader, sha256Hex, uuid4 } from "./hash";
+import { LruCache } from "./lru";
 
 export const AUTH_HOST = "https://webapp-prod.cloud.remarkable.engineering";
 export const SYNC_HOST = "https://internal.cloud.remarkable.com";
@@ -171,6 +172,8 @@ export interface CloudOptions {
   clientId?: string;
   /** Diagnostics sink (Zotero.debug in the plugin); keeps this module Zotero-free. */
   log?: (message: string) => void;
+  /** Byte cap of the in-memory cache of downloaded .rm page blobs. */
+  pageCacheBytes?: number;
 }
 
 /** Exchange a one-time code (from CONNECT_URL) for a long-lived device token. */
@@ -215,23 +218,48 @@ export async function pairDevice(steps: {
 /** Max cached index blobs (root and document indexes). */
 const INDEX_CACHE_MAX = 256;
 
+/** Max cached document metadata entries. */
+export const META_CACHE_MAX = 1024;
+
+/** Default byte cap of the .rm page blob cache. */
+export const DEFAULT_PAGE_CACHE_BYTES = 64 * 1024 * 1024;
+
 export class RemarkableCloud {
   private fetch: FetchFn;
   private userToken?: string;
   private host: string;
-  /** docSchema hash -> parsed metadata, so unchanged docs aren't refetched. */
-  private metaCache = new Map<string, RmItem>();
   /**
-   * .docSchema blob hash -> text. Blobs are content-addressed and immutable, so
-   * caching by hash is always correct; the root pointer (getRoot) is never
-   * cached. Bounded with least-recently-used eviction.
+   * docSchema hash -> parsed metadata, so unchanged docs aren't refetched.
+   * Bounded with least-recently-used eviction.
    */
-  private indexCache = new Map<string, string>();
+  private metaCache = new LruCache<string, RmItem>(META_CACHE_MAX);
+  /**
+   * Document .docSchema blob hash -> text. Blobs are content-addressed and
+   * immutable, so caching by hash is always correct; the root pointer
+   * (getRoot) is never cached. Bounded with least-recently-used eviction.
+   */
+  private indexCache = new LruCache<string, string>(INDEX_CACHE_MAX);
+  /**
+   * The latest root.docSchema text. Kept apart from indexCache so a large root
+   * index never evicts the small document indexes that are reused.
+   */
+  private rootText?: { hash: string; text: string };
+  /**
+   * .rm blob hash -> bytes, for the same reason as indexCache. Bounded by total
+   * bytes with least-recently-used eviction. Callers must not mutate the arrays.
+   */
+  private pageCache: LruCache<string, Uint8Array>;
+  /** Downloads in progress by hash, so concurrent callers share one request. */
+  private pageInflight = new Map<string, Promise<Uint8Array>>();
 
   constructor(private opts: CloudOptions) {
     this.fetch = opts.fetch;
     this.userToken = opts.userToken;
     this.host = opts.syncHost ?? SYNC_HOST;
+    this.pageCache = new LruCache(
+      opts.pageCacheBytes ?? DEFAULT_PAGE_CACHE_BYTES,
+      (data) => data.length,
+    );
   }
 
   async refreshUserToken() {
@@ -375,29 +403,53 @@ export class RemarkableCloud {
     return hash;
   }
 
+  /**
+   * Drops the cached .rm page blobs (up to 64 MB). They only help within one
+   * sync, so callers release them when a sync ends; downloads still in
+   * progress are unaffected.
+   */
+  clearPageCache() {
+    this.pageCache.clear();
+  }
+
+  /** An .rm page blob, cached by its immutable hash up to the byte cap. */
+  private async getPageBlob(hash: string, filename: string) {
+    const cached = this.pageCache.get(hash);
+    if (cached) return cached;
+    const pending = this.pageInflight.get(hash);
+    if (pending) return pending;
+    const download = this.downloadPage(hash, filename);
+    this.pageInflight.set(hash, download);
+    try {
+      return await download;
+    } finally {
+      this.pageInflight.delete(hash);
+    }
+  }
+
+  private async downloadPage(hash: string, filename: string) {
+    const data = await this.getBlob(hash, filename);
+    this.pageCache.set(hash, data);
+    return data;
+  }
+
   /** Text of an index (.docSchema) blob, cached by its immutable hash. */
   private async getIndexText(hash: string, filename: string): Promise<string> {
     const cached = this.indexCache.get(hash);
-    if (cached !== undefined) {
-      // Re-insert to mark as most recently used.
-      this.indexCache.delete(hash);
-      this.indexCache.set(hash, cached);
-      return cached;
-    }
+    if (cached !== undefined) return cached;
     const text = await this.getText(hash, filename);
     this.indexCache.set(hash, text);
-    while (this.indexCache.size > INDEX_CACHE_MAX) {
-      const oldest = this.indexCache.keys().next().value;
-      if (oldest === undefined) break;
-      this.indexCache.delete(oldest);
-    }
     return text;
   }
 
   async getRootEntries(root: RootInfo): Promise<IndexEntry[]> {
     if (!root.hash) return [];
-    return parseIndex(await this.getIndexText(root.hash, "root.docSchema"))
-      .entries;
+    let text = this.rootText?.hash === root.hash ? this.rootText.text : "";
+    if (!text) {
+      text = await this.getText(root.hash, "root.docSchema");
+      this.rootText = { hash: root.hash, text };
+    }
+    return parseIndex(text).entries;
   }
 
   async getDocEntries(entry: {
@@ -886,7 +938,10 @@ export class RemarkableCloud {
     return new Set(pageRefs(content).map((r) => r.id));
   }
 
-  /** Download the .content and every .rm page file of a document. */
+  /**
+   * Download the .content and every .rm page file of a document. Pages whose
+   * blob hash was seen before come from the in-memory page cache.
+   */
   async getDocumentFiles(id: string, entry?: IndexEntry) {
     entry ??= await this.findDocument(id);
     if (!entry) return undefined;
@@ -899,7 +954,7 @@ export class RemarkableCloud {
     const rmEntries = files.filter((f) => /\/[^/]+\.rm$/.test(f.id));
     await pool(rmEntries, 3, async (f) => {
       const pageId = f.id.slice(f.id.lastIndexOf("/") + 1, -3);
-      rm.set(pageId, await this.getBlob(f.hash, f.id));
+      rm.set(pageId, await this.getPageBlob(f.hash, f.id));
     });
     return { hash: entry.hash, content, rm, files };
   }

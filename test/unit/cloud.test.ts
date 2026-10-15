@@ -6,6 +6,7 @@ import {
   parseIndex,
   isTabletChangedError,
   RemarkableCloud,
+  META_CACHE_MAX,
   RemarkableError,
   serializeIndex,
 } from "../../src/remarkable/cloud";
@@ -95,6 +96,8 @@ class FakeCloud {
 
   /** Pathnames of every request, in order. */
   requests: string[] = [];
+  /** Number of GETs of blobs whose rm-filename ends in .rm. */
+  rmGets = 0;
 
   fetch = async (input: unknown, init: RequestInit = {}) => {
     const url = new URL(String(input));
@@ -133,6 +136,7 @@ class FakeCloud {
         this.puts.push({ filename: headers["rm-filename"], hash: m[1] });
         return new Response("", { status: 200 });
       }
+      if (headers["rm-filename"]?.endsWith(".rm")) this.rmGets++;
       const blob = this.blobs.get(m[1]);
       return blob
         ? new Response(blob as BodyInit, { status: 200 })
@@ -141,8 +145,9 @@ class FakeCloud {
     return new Response(`unexpected ${url.pathname}`, { status: 500 });
   };
 
-  cloud() {
+  cloud(extra: Partial<ConstructorParameters<typeof RemarkableCloud>[0]> = {}) {
     return new RemarkableCloud({
+      ...extra,
       fetch: this.fetch as unknown as typeof fetch,
       deviceToken: "unused",
       userToken: TOKEN,
@@ -885,6 +890,144 @@ test("the index cache is bounded and evicts the least recently used", async () =
   await get(0); // oldest: evicted
   assert.equal(fileGets(), 301);
 });
+
+test("getDocumentFiles refetches only pages whose blob changed", async () => {
+  const fake = new FakeCloud();
+  await clientCommitPages(fake, { p1: "strokes-1", p2: "strokes-2" });
+  const cloud = fake.cloud();
+  const rmGets = () => fake.rmGets;
+  const first = await cloud.getDocumentFiles(ID);
+  assert.ok(first);
+  assert.equal(dec.decode(first.rm.get("p1")), "strokes-1");
+  assert.equal(rmGets(), 2);
+
+  await fake.clientCommit(ID, { [`${ID}/p2.rm`]: "strokes-2b" });
+  const second = await cloud.getDocumentFiles(ID);
+  assert.ok(second);
+  assert.notEqual(second.hash, first.hash);
+  assert.equal(dec.decode(second.rm.get("p1")), "strokes-1");
+  assert.equal(dec.decode(second.rm.get("p2")), "strokes-2b");
+  assert.equal(rmGets(), 3, "only the changed page was downloaded");
+});
+
+test("the page cache respects its byte cap and evicts least recently used", async () => {
+  const fake = new FakeCloud();
+  await clientCommitPages(fake, { a: "aaaa", b: "bbbb", c: "cccc" });
+  const cloud = fake.cloud({ pageCacheBytes: 8 });
+  await cloud.getDocumentFiles(ID); // 12 bytes through an 8-byte cache
+  assert.equal(fake.rmGets, 3);
+  await cloud.getDocumentFiles(ID);
+  assert.equal(
+    fake.rmGets - 3,
+    1,
+    "two pages fit in 8 bytes, one is refetched",
+  );
+
+  // A blob larger than the cap is never cached.
+  const tiny = fake.cloud({ pageCacheBytes: 2 });
+  const before = fake.rmGets;
+  await tiny.getDocumentFiles(ID);
+  await tiny.getDocumentFiles(ID);
+  assert.equal(fake.rmGets - before, 6);
+});
+
+test("concurrent fetches of one page hash share a download and keep the cache size exact", async () => {
+  const fake = new FakeCloud();
+  // Two identical blank pages: one blob hash, two page ids.
+  await clientCommitPages(fake, { a: "blank", b: "blank" });
+  const cloud = fake.cloud({ pageCacheBytes: 20 });
+  const size = () =>
+    (cloud as unknown as { pageCache: { weight: number } }).pageCache.weight;
+  const files = await cloud.getDocumentFiles(ID);
+  assert.ok(files);
+  assert.equal(fake.rmGets, 1, "one request for the shared blob");
+  assert.equal(size(), 5);
+
+  // Repeated syncs do not drift the counter or refetch.
+  for (let i = 0; i < 5; i++) await cloud.getDocumentFiles(ID);
+  assert.equal(fake.rmGets, 1);
+  assert.equal(size(), 5);
+
+  // Cold cache, concurrent callers of the same hash directly.
+  const cold = fake.cloud({ pageCacheBytes: 20 });
+  const [h] = fake.docEntries(ID).filter((e) => e.id.endsWith("a.rm"));
+  const get = (
+    cold as unknown as {
+      getPageBlob(h: string, f: string): Promise<Uint8Array>;
+    }
+  ).getPageBlob.bind(cold);
+  const before = fake.rmGets;
+  await Promise.all([get(h.hash, h.id), get(h.hash, h.id), get(h.hash, h.id)]);
+  assert.equal(fake.rmGets - before, 1);
+  assert.equal(
+    (cold as unknown as { pageCache: { weight: number } }).pageCache.weight,
+    5,
+  );
+});
+
+test("clearPageCache drops cached pages and their weight", async () => {
+  const fake = new FakeCloud();
+  await clientCommitPages(fake, { a: "aaaa", b: "bbbb" });
+  const cloud = fake.cloud();
+  const internals = cloud as unknown as {
+    pageCache: { size: number; weight: number };
+  };
+  await cloud.getDocumentFiles(ID);
+  assert.equal(fake.rmGets, 2);
+  assert.equal(internals.pageCache.size, 2);
+  assert.equal(internals.pageCache.weight, 8);
+
+  cloud.clearPageCache();
+  assert.equal(internals.pageCache.size, 0);
+  assert.equal(internals.pageCache.weight, 0);
+
+  // Still works afterwards: pages are downloaded and cached again.
+  const files = await cloud.getDocumentFiles(ID);
+  assert.ok(files);
+  assert.equal(dec.decode(files.rm.get("a")), "aaaa");
+  assert.equal(fake.rmGets, 4);
+  assert.equal(internals.pageCache.weight, 8);
+});
+
+test("the metadata cache is bounded and evicts the least recently used", async () => {
+  const fake = new FakeCloud();
+  const cloud = fake.cloud();
+  const internals = cloud as unknown as {
+    metaCache: Map<string, unknown>;
+    loadItem(e: { id: string; hash: string }): Promise<unknown>;
+  };
+  const total = META_CACHE_MAX + 5;
+  const entries: { id: string; hash: string }[] = [];
+  for (let i = 0; i < total; i++) {
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    await fake.clientCommit(id, { [`${id}.metadata`]: metadata(`Doc ${i}`) });
+  }
+  for (const e of fake.rootEntries()) entries.push(e);
+  const fileGets = () =>
+    fake.requests.filter((r) => r.startsWith("/sync/v3/files/")).length;
+  for (const e of entries) await internals.loadItem(e);
+  assert.equal(internals.metaCache.size, META_CACHE_MAX);
+
+  const before = fileGets();
+  await internals.loadItem(entries[total - 1]); // recent: cached
+  assert.equal(fileGets(), before);
+  await internals.loadItem(entries[0]); // oldest: evicted, refetched
+  assert.ok(fileGets() > before);
+  assert.equal(internals.metaCache.size, META_CACHE_MAX);
+});
+
+async function clientCommitPages(
+  fake: FakeCloud,
+  pages: Record<string, string>,
+) {
+  await fake.clientCommit(ID, {
+    [`${ID}.metadata`]: metadata("Paper"),
+    [`${ID}.content`]: JSON.stringify({ pages: Object.keys(pages) }),
+    ...Object.fromEntries(
+      Object.entries(pages).map(([id, data]) => [`${ID}/${id}.rm`, data]),
+    ),
+  });
+}
 
 // Mirrors SyncEngine.push: the title handed to replacePdf comes from
 // titleToPush, so only a Zotero-side title change can rename the document.
