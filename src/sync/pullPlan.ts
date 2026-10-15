@@ -1,6 +1,8 @@
 /** Pure (Zotero-free) decisions for the pull pass, unit-testable in Node. */
 
 import type { ChangedDocument } from "../remarkable/cloud";
+import type { DocState } from "./state";
+
 export interface ImportedLike {
   kind: "annotation" | "note";
 }
@@ -118,6 +120,7 @@ export function needsPull(
     !!doc.pullIncomplete
   );
 }
+
 /**
  * The `rmDocHash` to record after we changed the tablet document. `known` is
  * the hash we last pulled or recorded; `changed.baseHash` is the document
@@ -134,4 +137,17 @@ export function nextRmDocHash(
   return known !== undefined && known === changed.baseHash
     ? changed.hash
     : undefined;
+}
+
+/**
+ * State for a document push() is about to upload. It starts at the current
+ * converter version, since there is nothing imported yet for an older
+ * converter to have produced; without it the second sync would see a version
+ * mismatch (see needsPull) and download every page for nothing.
+ */
+export function newUploadedDoc(
+  init: Omit<DocState, "imported" | "converterVersion">,
+  converterVersion: number,
+): DocState {
+  return { ...init, imported: {}, converterVersion };
 }
