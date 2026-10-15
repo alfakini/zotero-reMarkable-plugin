@@ -25,6 +25,7 @@ import {
   respaceWith,
   splitPageTexts,
 } from "./convert";
+import { resolveFolderId } from "./folderCache";
 import { Mutex } from "./mutex";
 import { titleToPush } from "./titlePush";
 import {
@@ -158,9 +159,18 @@ export class SyncEngine {
         if (doc && entry && tabletChanged) {
           await this.pull(att, doc, entry, report);
         }
-        folderId ??= this.settings().folder
-          ? await this.cloud.ensureFolder(this.settings().folder)
-          : "";
+        folderId ??= await resolveFolderId(
+          this.state,
+          this.settings().folder,
+          rootEntries,
+          (name) => this.cloud.ensureFolder(name),
+          (id) => {
+            const entry = rootEntries.get(id);
+            return entry
+              ? this.cloud.readMetadata(entry)
+              : Promise.resolve(undefined);
+          },
+        );
         await this.push(att, doc, folderId, report);
         doc = this.state.get(att.libraryID, att.key);
         if (doc && att.parentID) {

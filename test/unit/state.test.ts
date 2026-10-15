@@ -319,6 +319,62 @@ test("a pending upload forgotten before a failing push keeps its keys excluded",
   ]);
 });
 
+test("malformed folders and detached are normalised without discarding the rest", async () => {
+  for (const [folders, detached] of [
+    ["oops", [1, 2]],
+    [["a"], "oops"],
+    [{ Zotero: 5 }, { "1/A": [1], "1/B": "x" }],
+  ] as const) {
+    const io = memoryIO(
+      new Map([
+        [
+          PATH,
+          JSON.stringify({
+            version: 1,
+            docs: { "1/AAAA": doc("AAAA") },
+            folders,
+            detached,
+          }),
+        ],
+      ]),
+    );
+    const s = new SyncStateStore(PATH, io);
+    await s.load();
+    assert.ok(s.get(1, "AAAA"), "docs are kept");
+    assert.equal(s.getFolderId("Zotero"), undefined);
+    assert.deepEqual(s.getDetached(1, "A"), []);
+    // Writes now persist instead of throwing or being lost.
+    s.setFolderId("Zotero", "f1");
+    s.addDetached(1, "A", ["K1"]);
+    await s.save();
+    const r = new SyncStateStore(PATH, io);
+    await r.load();
+    assert.equal(r.getFolderId("Zotero"), "f1");
+    assert.deepEqual(r.getDetached(1, "A"), ["K1"]);
+    assert.ok(r.get(1, "AAAA"));
+  }
+});
+
+test("well-formed folders and detached entries are kept", async () => {
+  const io = memoryIO(
+    new Map([
+      [
+        PATH,
+        JSON.stringify({
+          version: 1,
+          docs: {},
+          folders: { Zotero: "f1" },
+          detached: { "1/A": ["K1"] },
+        }),
+      ],
+    ]),
+  );
+  const s = new SyncStateStore(PATH, io);
+  await s.load();
+  assert.equal(s.getFolderId("Zotero"), "f1");
+  assert.deepEqual(s.getDetached(1, "A"), ["K1"]);
+});
+
 test("concurrent loads share one read and do not clobber later changes", async () => {
   const io = memoryIO(
     new Map([[PATH, JSON.stringify({ version: 1, docs: {} })]]),

@@ -98,8 +98,38 @@ async function patchMetadata(
 /** A library entry whose metadata cannot be used; listItems skips it. */
 class UnreadableEntry extends Error {}
 
+function isUnreadable(e: unknown) {
+  return (
+    e instanceof UnreadableEntry ||
+    e instanceof SyntaxError ||
+    (e instanceof RemarkableError && e.status === 404)
+  );
+}
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+/** The metadata fields that decide whether a folder is the configured one. */
+export interface FolderMetadata {
+  type?: unknown;
+  parent?: unknown;
+  visibleName?: unknown;
+  deleted?: unknown;
+}
+
+/** True when `meta` is a live top-level folder called `name`. */
+export function isTopLevelFolder(
+  meta: FolderMetadata | undefined,
+  name: string,
+): boolean {
+  return (
+    !!meta &&
+    meta.type === "CollectionType" &&
+    meta.parent === "" &&
+    meta.visibleName === name &&
+    !meta.deleted
+  );
+}
 
 export function byId(a: { id: string }, b: { id: string }) {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -553,39 +583,59 @@ export class RemarkableCloud {
     const entries = await this.getRootEntries(root);
     const out: RmItem[] = [];
     await pool(entries, concurrency, async (entry) => {
-      let item = this.metaCache.get(entry.hash);
-      if (!item) {
-        try {
-          const files = await this.getDocEntries(entry);
-          const meta = files.find((f) => f.id === `${entry.id}.metadata`);
-          if (!meta) throw new UnreadableEntry("no metadata file");
-          const metadata = JSON.parse(
-            await this.getText(meta.hash, meta.id),
-          ) as RmMetadata;
-          if (!metadata || typeof metadata !== "object") {
-            throw new UnreadableEntry("metadata is not an object");
-          }
-          item = { id: entry.id, hash: entry.hash, metadata };
-          this.metaCache.set(entry.hash, item);
-        } catch (e) {
-          if (
-            !(e instanceof UnreadableEntry) &&
-            !(e instanceof SyntaxError) &&
-            !(e instanceof RemarkableError && e.status === 404)
-          ) {
-            throw e;
-          }
-          const reason = e instanceof Error ? e.message : String(e);
-          if (strict) {
-            throw new Error(`unreadable library entry ${entry.id}: ${reason}`);
-          }
-          this.opts.log?.(`skipping unreadable entry ${entry.id}: ${reason}`);
-          return;
+      let item: RmItem;
+      try {
+        item = await this.loadItem(entry);
+      } catch (e) {
+        if (!isUnreadable(e)) throw e;
+        const reason = e instanceof Error ? e.message : String(e);
+        if (strict) {
+          throw new Error(`unreadable library entry ${entry.id}: ${reason}`);
         }
+        this.opts.log?.(`skipping unreadable entry ${entry.id}: ${reason}`);
+        return;
       }
       if (!item.metadata.deleted) out.push(item);
     });
     return out;
+  }
+
+  /** Metadata of one root entry, cached by its (immutable) docSchema hash. */
+  private async loadItem(entry: { id: string; hash: string }): Promise<RmItem> {
+    const cached = this.metaCache.get(entry.hash);
+    if (cached) return cached;
+    const files = await this.getDocEntries(entry);
+    const meta = files.find((f) => f.id === `${entry.id}.metadata`);
+    if (!meta) throw new UnreadableEntry("no metadata file");
+    const metadata = JSON.parse(
+      await this.getText(meta.hash, meta.id),
+    ) as RmMetadata;
+    if (!metadata || typeof metadata !== "object") {
+      throw new UnreadableEntry("metadata is not an object");
+    }
+    const item = { id: entry.id, hash: entry.hash, metadata };
+    this.metaCache.set(entry.hash, item);
+    return item;
+  }
+
+  /**
+   * The metadata of a single root entry (one docSchema plus one metadata
+   * fetch, both cached by hash), or undefined when it is missing or
+   * unreadable. Auth, rate-limit, server and network errors propagate.
+   */
+  async readMetadata(entry: {
+    id: string;
+    hash: string;
+  }): Promise<RmMetadata | undefined> {
+    try {
+      return (await this.loadItem(entry)).metadata;
+    } catch (e) {
+      if (!isUnreadable(e)) throw e;
+      this.opts.log?.(
+        `unreadable entry ${entry.id}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -596,12 +646,7 @@ export class RemarkableCloud {
    */
   async ensureFolder(name: string, items?: RmItem[]): Promise<string> {
     items ??= await this.listItems({ strict: true });
-    const found = items.find(
-      (i) =>
-        i.metadata.type === "CollectionType" &&
-        i.metadata.visibleName === name &&
-        i.metadata.parent === "",
-    );
+    const found = items.find((i) => isTopLevelFolder(i.metadata, name));
     if (found) return found.id;
     const id = uuid4();
     const now = String(Date.now());

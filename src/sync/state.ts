@@ -344,6 +344,16 @@ export class SyncStateStore {
     }
   }
 
+  getFolderId(name: string): string | undefined {
+    const id = this.data.folders?.[name];
+    return typeof id === "string" && id ? id : undefined;
+  }
+
+  setFolderId(name: string, id: string) {
+    this.data.folders ??= {};
+    this.data.folders[name] = id;
+  }
+
   all(): DocState[] {
     return Object.values(this.data.docs);
   }
