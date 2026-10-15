@@ -1,0 +1,90 @@
+<linkset>
+  <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+</linkset>
+<vbox onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })">
+  <groupbox>
+    <label><html:h2 data-l10n-id="pref-account"></html:h2></label>
+    <html:p id="zotero-prefpane-__addonRef__-status"></html:p>
+    <vbox id="zotero-prefpane-__addonRef__-pairing">
+      <html:p data-l10n-id="pref-pair-help"></html:p>
+      <hbox align="center">
+        <button
+          id="zotero-prefpane-__addonRef__-open-connect"
+          data-l10n-id="pref-open-connect"
+        />
+        <html:input
+          type="text"
+          id="zotero-prefpane-__addonRef__-code"
+          maxlength="8"
+          size="10"
+          data-l10n-id="pref-code"
+        />
+        <button
+          id="zotero-prefpane-__addonRef__-connect"
+          data-l10n-id="pref-connect"
+        />
+      </hbox>
+    </vbox>
+    <hbox id="zotero-prefpane-__addonRef__-paired" align="center">
+      <button
+        id="zotero-prefpane-__addonRef__-sync-now"
+        data-l10n-id="pref-sync-now"
+      />
+      <button
+        id="zotero-prefpane-__addonRef__-disconnect"
+        data-l10n-id="pref-disconnect"
+      />
+    </hbox>
+  </groupbox>
+  <groupbox>
+    <label><html:h2 data-l10n-id="pref-sync"></html:h2></label>
+    <hbox align="center">
+      <html:label
+        for="zotero-prefpane-__addonRef__-folder"
+        data-l10n-id="pref-folder"
+      ></html:label>
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-folder"
+        preference="folder"
+      />
+    </hbox>
+    <hbox align="center">
+      <html:label
+        for="zotero-prefpane-__addonRef__-tag"
+        data-l10n-id="pref-tag"
+      ></html:label>
+      <html:input
+        type="text"
+        id="zotero-prefpane-__addonRef__-tag"
+        preference="syncTag"
+      />
+    </hbox>
+    <hbox align="center">
+      <html:label
+        for="zotero-prefpane-__addonRef__-auto-sync"
+        data-l10n-id="pref-auto-sync"
+      ></html:label>
+      <html:input
+        type="number"
+        min="0"
+        id="zotero-prefpane-__addonRef__-auto-sync"
+        preference="autoSyncMinutes"
+      />
+    </hbox>
+    <checkbox
+      id="zotero-prefpane-__addonRef__-append-notes"
+      preference="appendNotesPages"
+      data-l10n-id="pref-append-notes"
+    />
+    <checkbox
+      id="zotero-prefpane-__addonRef__-handwriting"
+      preference="importHandwriting"
+      data-l10n-id="pref-handwriting"
+    />
+  </groupbox>
+  <html:p
+    data-l10n-id="pref-help"
+    data-l10n-args='{"version":"__buildVersion__"}'
+  ></html:p>
+</vbox>

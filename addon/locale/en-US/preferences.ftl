@@ -1,0 +1,21 @@
+pref-account = reMarkable account
+pref-pair-help = Open the reMarkable pairing page, sign in, and paste the 8-letter one-time code here.
+pref-open-connect =
+    .label = Get one-time code…
+pref-code =
+    .placeholder = one-time code
+pref-connect =
+    .label = Connect
+pref-disconnect =
+    .label = Disconnect
+pref-sync-now =
+    .label = Sync now
+pref-sync = Sync
+pref-folder = Folder on reMarkable:
+pref-tag = Always sync items tagged:
+pref-auto-sync = Sync automatically every (minutes, 0 = off):
+pref-append-notes =
+    .label = Append a page with Zotero comments and notes to each PDF
+pref-handwriting =
+    .label = Import handwriting (ink annotations and notes with drawings)
+pref-help = reMarkable Sync for Zotero { $version }

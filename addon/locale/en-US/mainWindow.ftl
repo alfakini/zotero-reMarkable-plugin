@@ -1,0 +1,12 @@
+menu-submenu =
+    .label = reMarkable
+menu-sync =
+    .label = Sync with reMarkable
+menu-reimport =
+    .label = Re-import reMarkable annotations
+menu-remove-imported =
+    .label = Delete annotations imported from reMarkable
+menu-remove =
+    .label = Remove from reMarkable
+menu-sync-all =
+    .label = Sync with reMarkable

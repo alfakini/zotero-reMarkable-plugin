@@ -1,0 +1,10 @@
+prefs-title = reMarkable
+prefs-connected = Connected to the reMarkable cloud.
+prefs-not-connected = Not connected.
+prefs-connecting = Connecting…
+sync-start = Syncing with reMarkable…
+sync-done = Uploaded { $uploaded }, updated { $updated }, imported { $imported }, removed { $removed }.
+error-not-connected = Connect to reMarkable in Zotero Settings first.
+error-no-pdf = The selected items have no PDF attachments.
+removed-docs = Moved { $count } document(s) to the reMarkable trash.
+removed-imported = Deleted { $count } annotation(s)/note(s) imported from reMarkable.
