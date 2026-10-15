@@ -442,6 +442,33 @@ export function mergeConflict(zotero: RmParagraph[], tablet: RmParagraph[]) {
   ];
 }
 
+export type PairState =
+  /** The tablet page was deleted: drop the pair (and trash the note). */
+  | "pageGone"
+  /** The note is only in Zotero's trash: leave the pair and page untouched. */
+  | "paused"
+  /** The note no longer exists in the library: delete the tablet page. */
+  | "noteGone"
+  /** Both sides exist: sync as usual. */
+  | "active";
+
+/**
+ * Decide what to do with a note/page pair. A trashed note is recoverable, so
+ * it pauses the pair instead of deleting the page and its handwriting; so is
+ * a note that moved to another parent item (`existsElsewhere`: it is still in
+ * the library but no longer among the attachment parent's notes). Only a note
+ * that is gone from the library takes its page with it.
+ */
+export function pairState(
+  pageLive: boolean,
+  noteTrashed: boolean | undefined,
+  existsElsewhere = false,
+): PairState {
+  if (!pageLive) return "pageGone";
+  if (noteTrashed === undefined) return existsElsewhere ? "paused" : "noteGone";
+  return noteTrashed ? "paused" : "active";
+}
+
 /**
  * Run the steps that follow creating a note. When the note was created by this
  * call and a step throws, erase it (best effort) and rethrow the original

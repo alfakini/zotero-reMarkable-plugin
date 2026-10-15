@@ -50,8 +50,13 @@ the document on the tablet:
 - If the note and the page both changed since the last sync, nothing is lost: the
   note and the page get Zotero's text followed by the tablet's under a
   "Edited on reMarkable at the same time" heading.
-- Deleting the page on the tablet moves the note to Zotero's trash; deleting the note
-  in Zotero deletes the page.
+- Deleting the page on the tablet moves the note to Zotero's trash.
+- Deleting the note in Zotero removes the page only once the note is gone from the
+  library (emptied from the trash). A note that is only in the trash keeps its page
+  and its pairing, paused; restoring the note resumes sync.
+- Moving the note to another item also pauses it: the page stays on the tablet, and
+  moving the note back resumes sync. If the moved note is later erased from the
+  library, the page is removed.
 
 Other child notes are read-only on the tablet: they are listed on the appended
 "Zotero notes" page.

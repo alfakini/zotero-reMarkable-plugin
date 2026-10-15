@@ -24,12 +24,18 @@ import {
   applyPairPlan,
   landedPages,
   nextNoteTitle,
+  pairState,
   plainText,
   planPair,
   TabletCommits,
 } from "./notes";
 import type { DocState } from "./state";
-import { childNotes, trashByKey, writeSyncedNote } from "./zotero";
+import {
+  childNotesWithTrashed,
+  existsInLibrary,
+  trashByKey,
+  writeSyncedNote,
+} from "./zotero";
 
 export interface NoteSyncResult {
   toTablet: number;
@@ -50,9 +56,15 @@ export function notesFingerprint(att: Zotero.Item, doc: DocState) {
   );
   return fingerprint([
     NOTE_SYNC_VERSION,
-    ...childNotes(att)
-      .filter((n) => mapped.has(n.key) || isSyncedNoteTitle(n.getNoteTitle()))
-      .map((n) => [n.key, n.getNote()]),
+    ...childNotesWithTrashed(att)
+      // Trashed notes only matter while paired: trashing, restoring or
+      // emptying the trash for them must trigger a sync.
+      .filter((n) =>
+        n.deleted
+          ? mapped.has(n.key)
+          : mapped.has(n.key) || isSyncedNoteTitle(n.getNoteTitle()),
+      )
+      .map((n) => [n.key, n.deleted ? "trashed" : n.getNote()]),
   ]);
 }
 
@@ -95,9 +107,13 @@ export async function syncNotes(
     inserted.map((r) => files.rm.get(r.id)).find(Boolean) ??
     [...files.rm.values()][0];
 
-  const notes = childNotes(att);
-  const noteByKey = new Map(notes.map((n) => [n.key, n]));
-  const titles = () => childNotes(att).map((n) => n.getNoteTitle());
+  const allNotes = childNotesWithTrashed(att);
+  const notes = allNotes.filter((n) => !n.deleted);
+  const noteByKey = new Map(allNotes.map((n) => [n.key, n]));
+  // Titles of the live notes by key, kept current as notes are trashed,
+  // retitled or created below.
+  const titleByKey = new Map(notes.map((n) => [n.key, n.getNoteTitle()]));
+  const titles = () => [...titleByKey.values()];
 
   const tabletBody = (page?: RmPage): RmParagraph[] =>
     (page?.rootText?.paragraphs ?? []).filter((p) => p.text.trim());
@@ -117,21 +133,34 @@ export async function syncNotes(
   // 1. Existing pairs.
   for (const [pageId, rec] of Object.entries(notePages)) {
     const note = noteByKey.get(rec.noteKey);
-    if (!livePages.has(pageId)) {
+    // A note dragged to another parent is no longer among this item's
+    // notes but still exists: pause the pair rather than delete the page.
+    const state = pairState(
+      livePages.has(pageId),
+      note ? !!note.deleted : undefined,
+      !note && existsInLibrary(att.libraryID, rec.noteKey),
+    );
+    if (state === "pageGone") {
       // Page deleted on the tablet -> move the note to Zotero's trash.
-      if (note) await trashByKey(att.libraryID, rec.noteKey);
+      if (note && !note.deleted) {
+        await trashByKey(att.libraryID, rec.noteKey);
+        titleByKey.delete(rec.noteKey);
+      }
       delete notePages[pageId];
       result.removed++;
       continue;
     }
-    if (!note) {
-      // Note deleted in Zotero -> delete the page on the tablet.
+    if (state === "noteGone") {
+      // Note gone from the library -> delete the page on the tablet.
       content = deletePage(content, pageId, authorId);
       contentChanged = true;
       tabletCommits.defer(() => delete notePages[pageId]);
       result.removed++;
       continue;
     }
+    // Trashed or reparented note: keep the pair and the page as they are until
+    // the note is restored, moved back or erased.
+    if (state === "paused" || !note) continue;
     const page = pageOf(pageId);
     const tablet = tabletBody(page);
     const parsedNote = htmlToParagraphs(note.getNote());
@@ -170,6 +199,7 @@ export async function syncNotes(
                 adoptLegacyDrawing: rec.drawingHash !== undefined,
               },
             );
+            titleByKey.set(rec.noteKey, title);
             rec.drawingHash = drawingHash;
             rec.drawingKey = written.drawingKey;
           }
@@ -186,10 +216,11 @@ export async function syncNotes(
     const body = tabletBody(page);
     const drawing = drawingOf(page);
     if (!body.length && !drawing) continue; // still blank
+    const title = nextNoteTitle(titles());
     const written = await writeSyncedNote(
       att,
       undefined,
-      nextNoteTitle(titles()),
+      title,
       body,
       drawing,
       { rewriteBody: true },
@@ -201,6 +232,7 @@ export async function syncNotes(
       drawingKey: written.drawingKey,
     };
     pagedNotes.add(written.key);
+    titleByKey.set(written.key, title);
     result.created++;
   }
 

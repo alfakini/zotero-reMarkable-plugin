@@ -267,11 +267,16 @@ export function existsByKey(libraryID: number, key: string) {
   return !!item && !item.deleted;
 }
 
-/** Live (not trashed) child notes of the attachment's parent item. */
-export function childNotes(attachment: Zotero.Item): Zotero.Item[] {
+/** Child notes of the attachment's parent item, including trashed ones. */
+export function childNotesWithTrashed(attachment: Zotero.Item): Zotero.Item[] {
   const parent = attachment.parentItem;
   if (!parent) return [];
-  return Zotero.Items.get(parent.getNotes()).filter((n) => !n.deleted);
+  return Zotero.Items.get(parent.getNotes(true));
+}
+
+/** Whether an item with this key still exists in the library (any parent). */
+export function existsInLibrary(libraryID: number, key: string): boolean {
+  return !!Zotero.Items.getByLibraryAndKey(libraryID, key);
 }
 
 /** Move an item to Zotero's trash (recoverable). */

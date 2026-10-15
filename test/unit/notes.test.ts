@@ -18,6 +18,7 @@ import {
   landedPages,
   mergeConflict,
   nextNoteTitle,
+  pairState,
   paragraphsToHtml,
   patchDrawing,
   legacyDrawingKey,
@@ -193,6 +194,32 @@ test("patchDrawing appends inside the wrapper when the image is missing", () => 
 test("patchDrawing never touches an image it does not own", () => {
   assert.equal(patchDrawing(WRAPPED, "NOPE0000"), WRAPPED);
   assert.equal(patchDrawing(WRAPPED, undefined), WRAPPED);
+});
+
+test("pairState keeps the page while the note is only in the trash", () => {
+  assert.equal(pairState(true, true), "paused");
+  assert.equal(pairState(true, false), "active");
+});
+
+test("pairState deletes the page only when the note is gone", () => {
+  assert.equal(pairState(true, undefined), "noteGone");
+});
+
+test("pairState pauses a note that moved to another parent", () => {
+  assert.equal(pairState(true, undefined, true), "paused");
+  assert.equal(pairState(true, undefined, false), "noteGone");
+});
+
+test("pairState ignores the library lookup when the note is a child", () => {
+  assert.equal(pairState(true, false, true), "active");
+  assert.equal(pairState(true, true, true), "paused");
+});
+
+test("pairState reports a page deleted on the tablet first", () => {
+  assert.equal(pairState(false, undefined), "pageGone");
+  assert.equal(pairState(false, true), "pageGone");
+  assert.equal(pairState(false, false), "pageGone");
+  assert.equal(pairState(false, undefined, true), "pageGone");
 });
 
 test("erases a note created in this call when a later step throws, then rethrows", async () => {
