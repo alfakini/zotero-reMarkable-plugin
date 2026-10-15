@@ -251,6 +251,169 @@ test("respace restores spacing and hyphenation from page text", async () => {
   assert.equal(respace("not on page", page), "not on page");
 });
 
+test("respace stays aligned when the page text has ligatures", async () => {
+  const { respace } = await import("../../src/sync/convert");
+  // "\uFB01" (fi) and "\uFB03" (ffi) expand under NFKC.
+  const page = "The \uFB01rst o\uFB03ce was \uFB01ne and quiet today";
+  assert.equal(respace("Thefirst office", page), "The \uFB01rst o\uFB03ce");
+  // Match ending on a ligature: previously the end index ran off the table.
+  assert.equal(respace("wasfine", page), "was \uFB01ne");
+  assert.equal(respace("was\uFB01", page), "was \uFB01");
+  // Ligature only in the tablet text.
+  assert.equal(respace("\uFB01nequiet", "so fine quiet now"), "fine quiet");
+});
+
+test("respace handles ligatures with hyphenation and no match", async () => {
+  const { respace } = await import("../../src/sync/convert");
+  const page = "an e\uFB03-\ncient and o\uFB03cial pro-\ncess here";
+  assert.equal(
+    respace("efficientandofficialprocess", page),
+    "e\uFB03cient and o\uFB03cial process",
+  );
+  assert.equal(respace("o\uFB03cial", page), "o\uFB03cial");
+  assert.equal(respace("missing \uFB01 text", page), "missing \uFB01 text");
+  assert.equal(respace("anything", ""), "anything");
+  assert.equal(respace("anything", undefined), "anything");
+});
+
+test("respace keeps astral characters whole and measures in code units", async () => {
+  const { respace } = await import("../../src/sync/convert");
+  // U+20BB7 is outside the BMP (a surrogate pair in UTF-16).
+  const ideo = "\u{20BB7}";
+  // Previously the end index fell one unit short and dropped the "x".
+  assert.equal(respace(`${ideo}x`, `see ${ideo}x here`), `${ideo}x`);
+  assert.equal(respace(`a${ideo}b`, `so a ${ideo} b ok`), `a ${ideo} b`);
+  assert.equal(
+    respace(`${ideo}${ideo}z`, `${ideo}${ideo} z end`),
+    `${ideo}${ideo} z`,
+  );
+  // Emoji, followed by more text and mixed with ligatures.
+  const smile = "\u{1F600}";
+  assert.equal(
+    respace(`hi${smile}there`, `say hi ${smile} there now`),
+    `hi ${smile} there`,
+  );
+  assert.equal(
+    respace(`${smile}\uFB01nal`, `ok ${smile} \uFB01nal word`),
+    `${smile} \uFB01nal`,
+  );
+  // Text before the match contains astral characters: offsets must not drift.
+  assert.equal(respace("wordnext", `${smile}${ideo} word next`), "word next");
+  // No match still falls back to the input.
+  assert.equal(respace(`${ideo}q`, `see ${ideo}x here`), `${ideo}q`);
+});
+
+test("respaceWith over a shared page index matches respace", async () => {
+  const { respace, respaceWith, buildPageIndex } = await import(
+    "../../src/sync/convert"
+  );
+  // The pre-index algorithm, kept verbatim as the reference.
+  const reference = (text: string, pageText: string | undefined) => {
+    if (!pageText || !text) return text;
+    const expand = (c: string) =>
+      c.normalize("NFKC").toLowerCase().replace(/[\s-]/g, "");
+    const start: number[] = [];
+    const end: number[] = [];
+    let compact = "";
+    let i = 0;
+    for (const ch of pageText) {
+      const x = expand(ch);
+      for (let k = 0; k < x.length; k++) {
+        start.push(i);
+        end.push(i + ch.length);
+      }
+      compact += x;
+      i += ch.length;
+    }
+    let needle = "";
+    for (const ch of text) needle += expand(ch);
+    if (!needle) return text;
+    const at = compact.indexOf(needle);
+    if (at < 0) return text;
+    const first = start[at];
+    const last = end[at + needle.length - 1];
+    if (first === undefined || last === undefined) return text;
+    return pageText
+      .slice(first, last)
+      .replace(/-\s*\n\s*/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+  const ideo = "\u{20BB7}";
+  const smile = "\u{1F600}";
+  const cases: Array<[string, string | undefined]> = [
+    [
+      "Whenprovided as input several example language commands (formattedas comments)",
+      "parameterize control APIs. When provided as input several example\nlanguage commands (formatted as com-\nments) followed by",
+    ],
+    ["not on page", "parameterize control APIs. When provided"],
+    ["Thefirst office", "The \uFB01rst o\uFB03ce was \uFB01ne and quiet today"],
+    ["wasfine", "The \uFB01rst o\uFB03ce was \uFB01ne and quiet today"],
+    ["was\uFB01", "The \uFB01rst o\uFB03ce was \uFB01ne and quiet today"],
+    ["\uFB01nequiet", "so fine quiet now"],
+    [
+      "efficientandofficialprocess",
+      "an e\uFB03-\ncient and o\uFB03cial pro-\ncess here",
+    ],
+    [
+      "missing \uFB01 text",
+      "an e\uFB03-\ncient and o\uFB03cial pro-\ncess here",
+    ],
+    ["anything", ""],
+    ["anything", undefined],
+    ["", "page"],
+    [" - ", "page - text"],
+    [`${ideo}x`, `see ${ideo}x here`],
+    [`a${ideo}b`, `so a ${ideo} b ok`],
+    [`hi${smile}there`, `say hi ${smile} there now`],
+    [`${smile}\uFB01nal`, `ok ${smile} \uFB01nal word`],
+    ["wordnext", `${smile}${ideo} word next`],
+    [`${ideo}q`, `see ${ideo}x here`],
+  ];
+  for (const [text, page] of cases) {
+    const expected = reference(text, page);
+    assert.equal(respace(text, page), expected);
+    const index = page ? buildPageIndex(page) : undefined;
+    assert.equal(respaceWith(text, page, index), expected);
+  }
+  // Randomised: ASCII-only and mixed pages, queried many times per index.
+  let seed = 12345;
+  const rnd = (n: number) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const ascii = ["a", "B", "c", "d", "e", " ", " ", "-", "\n", "\t", ".", "1"];
+  const wide = [...ascii, "\uFB01", "\uFB03", ideo, smile, "\u00e9", "\u00a0"];
+  const gen = (alphabet: string[], len: number) =>
+    Array.from({ length: len }, () => alphabet[rnd(alphabet.length)]).join("");
+  for (let n = 0; n < 200; n++) {
+    const alphabet = n % 2 ? wide : ascii;
+    const page = gen(alphabet, 5 + rnd(60));
+    const index = buildPageIndex(page);
+    for (let q = 0; q < 8; q++) {
+      // Half the queries are slices of the page with spacing stripped.
+      const a = rnd(page.length);
+      const sliced = page.slice(a, a + 1 + rnd(20)).replace(/[\s-]/g, "");
+      const text = q % 2 ? sliced : gen(alphabet, 1 + rnd(6));
+      assert.equal(
+        respaceWith(text, page, index),
+        reference(text, page),
+        JSON.stringify({ text, page }),
+      );
+    }
+  }
+});
+
+test("splitPageTexts never spreads one page of text over other pages", async () => {
+  const { splitPageTexts } = await import("../../src/sync/convert");
+  assert.deepEqual(splitPageTexts("a\fb\fc", 3), ["a", "b", "c"]);
+  assert.deepEqual(splitPageTexts("only", 1), ["only"]);
+  assert.deepEqual(splitPageTexts("all pages in one blob", 5), []);
+  assert.deepEqual(splitPageTexts("unknown count"), []);
+  assert.deepEqual(splitPageTexts(undefined, 2), []);
+  assert.deepEqual(splitPageTexts("", 2), []);
+});
+
 test("handwriting written together becomes one ink annotation", async () => {
   const { clusterLines } = await import("../../src/sync/convert");
   // "Test Handwrite" written on one line on a Paper Pro.

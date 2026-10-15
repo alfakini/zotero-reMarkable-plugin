@@ -576,6 +576,73 @@ export function renderSvg(lines: RmLine[]) {
   return { markup, width: displayW, height: displayH };
 }
 
+/** Normalised form of one page's text, built once and reused per highlight. */
+export interface PageIndex {
+  /** Lower-cased NFKC text without whitespace and hyphens. */
+  compact: string;
+  /** Per `compact` UTF-16 unit, its source span in the page: [start, end, ...]. */
+  pos: number[];
+}
+
+const ASCII_ONLY = /^[^\u0080-\uffff]*$/;
+const SKIPPED = /[\s-]/;
+
+// NFKC can expand one source character into several ("\uFB01" -> "fi"), so
+// callers give every expanded UTF-16 unit its own entry that maps back to the
+// source character's span; otherwise needle offsets drift away from the span.
+const expand = (c: string) =>
+  c.normalize("NFKC").toLowerCase().replace(/[\s-]/g, "");
+
+/**
+ * Build the normalised index of a page for {@link respaceWith}. Iterates by
+ * code point so astral characters (surrogate pairs) stay whole, and measures
+ * everything in UTF-16 units to match indexOf and slice.
+ */
+export function buildPageIndex(pageText: string): PageIndex {
+  const pos: number[] = [];
+  let compact = "";
+  if (ASCII_ONLY.test(pageText)) {
+    // ASCII is stable under NFKC and lower-casing is one-to-one, so skip normalize.
+    for (let i = 0; i < pageText.length; i++) {
+      const ch = pageText[i];
+      if (SKIPPED.test(ch)) continue;
+      compact += ch.toLowerCase();
+      pos.push(i, i + 1);
+    }
+    return { compact, pos };
+  }
+  let i = 0;
+  for (const ch of pageText) {
+    const x = expand(ch);
+    for (let k = 0; k < x.length; k++) pos.push(i, i + ch.length);
+    compact += x;
+    i += ch.length;
+  }
+  return { compact, pos };
+}
+
+/** {@link respace} against a prebuilt {@link PageIndex} of `pageText`. */
+export function respaceWith(
+  text: string,
+  pageText: string | undefined,
+  index: PageIndex | undefined,
+): string {
+  if (!pageText || !index || !text) return text;
+  let needle = "";
+  for (const ch of text) needle += expand(ch);
+  if (!needle) return text;
+  const at = index.compact.indexOf(needle);
+  if (at < 0) return text;
+  const first = index.pos[2 * at];
+  const last = index.pos[2 * (at + needle.length - 1) + 1];
+  if (first === undefined || last === undefined) return text;
+  return pageText
+    .slice(first, last)
+    .replace(/-\s*\n\s*/g, "") // re-join hyphenated line breaks
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /**
  * The tablet copies highlighted text straight from the PDF text layer, which
  * often lacks spaces ("Whenprovided"). Find the same characters in a properly
@@ -583,27 +650,21 @@ export function renderSvg(lines: RmLine[]) {
  */
 export function respace(text: string, pageText: string | undefined): string {
   if (!pageText || !text) return text;
-  const norm = (c: string) => c.normalize("NFKC").toLowerCase();
-  const compact: string[] = [];
-  const pos: number[] = [];
-  for (let i = 0; i < pageText.length; i++) {
-    const c = pageText[i];
-    if (/\s|-/.test(c)) continue;
-    compact.push(norm(c));
-    pos.push(i);
-  }
-  const needle = [...text]
-    .filter((c) => !/\s|-/.test(c))
-    .map(norm)
-    .join("");
-  if (!needle) return text;
-  const at = compact.join("").indexOf(needle);
-  if (at < 0) return text;
-  const start = pos[at];
-  const end = pos[at + needle.length - 1] + 1;
-  return pageText
-    .slice(start, end)
-    .replace(/-\s*\n\s*/g, "") // re-join hyphenated line breaks
-    .replace(/\s+/g, " ")
-    .trim();
+  return respaceWith(text, pageText, buildPageIndex(pageText));
+}
+
+/**
+ * Split Zotero's full-text extraction into per-page strings. Pages are
+ * expected to be separated by a form feed. If no separator is present but the
+ * document has more than one page, the text cannot be attributed to a page, so
+ * return nothing rather than apply it to the wrong pages.
+ */
+export function splitPageTexts(
+  text: string | undefined,
+  totalPages?: number,
+): string[] {
+  if (!text) return [];
+  const pages = text.split("\f");
+  if (pages.length === 1 && totalPages !== 1) return [];
+  return pages;
 }
