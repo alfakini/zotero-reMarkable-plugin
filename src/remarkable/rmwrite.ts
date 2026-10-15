@@ -16,7 +16,7 @@ import {
   type RmParagraph,
 } from "./rmscene";
 
-const enum Tag {
+enum Tag {
   ID = 0xf,
   Length4 = 0xc,
   Byte8 = 0x8,

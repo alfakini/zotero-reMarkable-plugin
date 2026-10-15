@@ -127,7 +127,7 @@ export const isShader = (tool: number) =>
   (Tool.SHADER as readonly number[]).includes(tool);
 export const isEraser = (tool: number) => tool === 6 || tool === 8;
 
-const enum TagType {
+enum TagType {
   ID = 0xf,
   Length4 = 0xc,
   Byte8 = 0x8,
@@ -547,7 +547,10 @@ export function toposort<T extends { id: string; left: string; right: string }>(
   const deps = new Map<string, Set<string>>();
   const dep = (k: string) => {
     let d = deps.get(k);
-    if (!d) deps.set(k, (d = new Set()));
+    if (!d) {
+      d = new Set();
+      deps.set(k, d);
+    }
     return d;
   };
   for (const item of items) {
@@ -690,7 +693,7 @@ export function parseRm(data: Uint8Array): RmPage {
   return {
     lines: lines.filter((l) => !isHidden(l.parent)),
     glyphs: glyphs.filter((g) => !isHidden(g.parent)),
-    text: text && text.text.trim() ? text : undefined,
+    text: text?.text.trim() ? text : undefined,
     rootText: text,
     maxCounter: r.maxCounter,
     authors,

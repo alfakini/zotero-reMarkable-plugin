@@ -12,8 +12,8 @@ import {
   BlendMode,
   LineCapStyle,
   PDFDocument,
-  PDFFont,
-  PDFPage,
+  type PDFFont,
+  type PDFPage,
   StandardFonts,
   rgb,
 } from "pdf-lib";

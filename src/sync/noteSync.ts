@@ -231,7 +231,8 @@ export async function syncNotes(
  * notes keyed `<pageId>/page`. Adopt those notes as synced pairs.
  */
 export function migrateImportedPageNotes(doc: DocState) {
-  const notePages = (doc.notePages ??= {});
+  doc.notePages ??= {};
+  const notePages = doc.notePages;
   for (const [rmKey, rec] of Object.entries(doc.imported)) {
     const m = /^([^/]+)\/page$/.exec(rmKey);
     if (!m || rec.kind !== "note") continue;

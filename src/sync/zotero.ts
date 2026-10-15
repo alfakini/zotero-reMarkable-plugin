@@ -18,8 +18,8 @@ export async function pdfAttachments(
     if (item.isPDFAttachment?.()) out.set(item.id, item);
     else if (item.isRegularItem()) {
       for (const id of item.getAttachments()) {
-        const att = Zotero.Items.get(id) as Zotero.Item | false;
-        if (att && att.isPDFAttachment()) out.set(att.id, att);
+        const att = (Zotero.Items.get(id) as Zotero.Item | false) || undefined;
+        if (att?.isPDFAttachment()) out.set(att.id, att);
       }
     }
   }
@@ -56,7 +56,7 @@ export function zoteroAnnotations(
     .getAnnotations()
     .filter((a) => !skip.has(a.key))
     .map((a) => {
-      let position;
+      let position: ZAnnotation["position"];
       try {
         position = JSON.parse(a.annotationPosition);
       } catch {

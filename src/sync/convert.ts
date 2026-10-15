@@ -297,8 +297,10 @@ function unionFind(
   linked: (i: number, j: number) => boolean,
 ): number[][] {
   const parent = Array.from({ length: n }, (_, i) => i);
-  const find = (i: number): number =>
-    parent[i] === i ? i : (parent[i] = find(parent[i]));
+  const find = (i: number): number => {
+    if (parent[i] !== i) parent[i] = find(parent[i]); // path compression
+    return parent[i];
+  };
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       if (find(i) !== find(j) && linked(i, j)) parent[find(i)] = find(j);

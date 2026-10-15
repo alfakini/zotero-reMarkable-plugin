@@ -9,7 +9,7 @@
  *   3. notes: two-way sync of "reMarkable Note …" notes with their pages.
  */
 import {
-  RemarkableCloud,
+  type RemarkableCloud,
   RemarkableError,
   type IndexEntry,
 } from "../remarkable/cloud";
@@ -27,7 +27,7 @@ import {
   syncNotes,
 } from "./noteSync";
 import { buildRemarkablePdf } from "./pdfExport";
-import { SyncStateStore, type DocState } from "./state";
+import type { SyncStateStore, DocState } from "./state";
 import {
   eraseByKey,
   existsByKey,

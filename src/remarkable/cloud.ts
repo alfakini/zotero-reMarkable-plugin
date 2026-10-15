@@ -85,7 +85,7 @@ export function serializeIndex(id: string, entries: IndexEntry[]): string {
     `0:${id}:${sorted.length}:${total}`,
     ...sorted.map((e) => `${e.hash}:0:${e.id}:${e.subfiles}:${e.size}`),
   ];
-  return lines.join("\n") + "\n";
+  return `${lines.join("\n")}\n`;
 }
 
 export interface CloudOptions {
