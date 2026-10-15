@@ -21,6 +21,11 @@ export interface NotePageRecord {
   base?: string;
   /** Fingerprint of the handwriting drawing last copied into the note. */
   drawingHash?: string;
+  /**
+   * Key of the embedded-image attachment the plugin created for the drawing.
+   * Only this attachment is replaced or erased; user images are left alone.
+   */
+  drawingKey?: string;
   /** Adopted from the older one-way import; base is set on first sync. */
   migrated?: boolean;
 }

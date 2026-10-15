@@ -149,23 +149,29 @@ export async function syncNotes(
       result.toTablet++;
     }
     if (plan.zoteroBody) result.toZotero++;
-    const needsWrite =
-      !!plan.zoteroBody ||
-      drawingHash !== rec.drawingHash ||
-      title !== parsedNote.title;
+    // Regenerate the body only when its text must change (or the title was
+    // fixed); a drawing-only change swaps just the plugin's image.
+    const rewriteBody = !!plan.zoteroBody || title !== parsedNote.title;
+    const needsWrite = rewriteBody || drawingHash !== rec.drawingHash;
     await applyPairPlan(
       rec,
       plan,
       needsWrite
         ? async () => {
-            await writeSyncedNote(
+            const written = await writeSyncedNote(
               att,
               rec.noteKey,
               title,
               plan.zoteroBody ?? zotero,
               drawing,
+              {
+                rewriteBody,
+                drawingKey: rec.drawingKey,
+                adoptLegacyDrawing: rec.drawingHash !== undefined,
+              },
             );
             rec.drawingHash = drawingHash;
+            rec.drawingKey = written.drawingKey;
           }
         : undefined,
       tabletCommits,
@@ -180,19 +186,21 @@ export async function syncNotes(
     const body = tabletBody(page);
     const drawing = drawingOf(page);
     if (!body.length && !drawing) continue; // still blank
-    const key = await writeSyncedNote(
+    const written = await writeSyncedNote(
       att,
       undefined,
       nextNoteTitle(titles()),
       body,
       drawing,
+      { rewriteBody: true },
     );
     notePages[ref.id] = {
-      noteKey: key,
+      noteKey: written.key,
       base: plainText(body),
       drawingHash: drawing ? fingerprint(drawing.markup) : undefined,
+      drawingKey: written.drawingKey,
     };
-    pagedNotes.add(key);
+    pagedNotes.add(written.key);
     result.created++;
   }
 

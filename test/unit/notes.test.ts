@@ -11,12 +11,18 @@ import { parseRm, ParagraphStyle as S } from "../../src/remarkable/rmscene";
 import { writePageText } from "../../src/remarkable/rmwrite";
 import {
   decide,
+  embeddedImageKeys,
+  eraseIfCreatedOnError,
   htmlToParagraphs,
   isSyncedNoteTitle,
   landedPages,
   mergeConflict,
   nextNoteTitle,
   paragraphsToHtml,
+  patchDrawing,
+  legacyDrawingKey,
+  staleDrawingKeys,
+  importSaveThenErase,
   plainText,
   withTabletStyles,
 } from "../../src/sync/notes";
@@ -129,6 +135,313 @@ test("note text round-trips through .rm pages, keeping handwriting", () => {
   const hw = fixture("code_as_policies_p1_handwriting.rm");
   const withText = writePageText(hw, body, { authorUuid: AUTHOR });
   assert.equal(parseRm(withText).lines.length, parseRm(hw).lines.length);
+});
+
+const WRAPPED =
+  '<div class="zotero-note znv1"><div data-schema-version="9"><h1>reMarkable Note 1</h1>' +
+  '<p>see <a href="https://example.org">this</a> and <strong>that</strong></p>' +
+  "<ul><li><p>one<ul><li><p>nested</p></li></ul></p></li></ul>" +
+  '<p><img data-attachment-key="USER0001" width="5" height="5"/></p>' +
+  '<p><img width="10" height="20" data-attachment-key="DRAW0001"/></p></div></div>';
+
+test("patchDrawing swaps only the plugin image and keeps user content", () => {
+  const out = patchDrawing(WRAPPED, "DRAW0001", {
+    key: "DRAW0002",
+    width: 30,
+    height: 40,
+  });
+  assert.ok(out.includes('<a href="https://example.org">this</a>'));
+  assert.ok(out.includes("<strong>that</strong>"));
+  assert.ok(out.includes("<li><p>nested</p></li>"));
+  assert.ok(out.includes('data-attachment-key="USER0001"'));
+  assert.ok(!out.includes("DRAW0001"));
+  assert.ok(
+    out.includes(
+      '<p><img data-attachment-key="DRAW0002" width="30" height="40"/></p></div></div>',
+    ),
+  );
+  assert.deepEqual(embeddedImageKeys(out), ["USER0001", "DRAW0002"]);
+});
+
+test("patchDrawing removes the plugin image and its empty paragraph", () => {
+  const out = patchDrawing(WRAPPED, "DRAW0001");
+  assert.ok(!out.includes("DRAW0001"));
+  assert.ok(out.endsWith("</p></div></div>"));
+  assert.ok(!out.includes("<p></p>"));
+  assert.ok(out.includes("USER0001"));
+});
+
+test("patchDrawing appends inside the wrapper when the image is missing", () => {
+  const drawing = { key: "NEW00001", width: 1, height: 2 };
+  const withoutImg = WRAPPED.replace(/<p><img[^>]*DRAW0001[^>]*><\/p>/, "");
+  for (const old of ["DRAW0001", undefined]) {
+    const out = patchDrawing(withoutImg, old, drawing);
+    assert.ok(
+      out.endsWith(
+        '<p><img data-attachment-key="NEW00001" width="1" height="2"/></p></div></div>',
+      ),
+    );
+    assert.ok(out.includes("USER0001"));
+  }
+  const bare = patchDrawing("<p>hi</p>", undefined, drawing);
+  assert.equal(
+    bare,
+    '<p>hi</p><p><img data-attachment-key="NEW00001" width="1" height="2"/></p>',
+  );
+});
+
+test("patchDrawing never touches an image it does not own", () => {
+  assert.equal(patchDrawing(WRAPPED, "NOPE0000"), WRAPPED);
+  assert.equal(patchDrawing(WRAPPED, undefined), WRAPPED);
+});
+
+test("erases a note created in this call when a later step throws, then rethrows", async () => {
+  let erased = 0;
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      true,
+      async () => {
+        erased++;
+      },
+      async () => {
+        throw new Error("importEmbeddedImage failed");
+      },
+    ),
+    /importEmbeddedImage failed/,
+  );
+  assert.equal(erased, 1);
+});
+
+test("never erases a pre-existing note when a step throws", async () => {
+  let erased = 0;
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      false,
+      async () => {
+        erased++;
+      },
+      async () => {
+        throw new Error("boom");
+      },
+    ),
+    /boom/,
+  );
+  assert.equal(erased, 0);
+});
+
+test("a failing cleanup does not mask the original error", async () => {
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      true,
+      async () => {
+        throw new Error("erase failed");
+      },
+      async () => {
+        throw new Error("original");
+      },
+    ),
+    /original/,
+  );
+});
+
+test("a failing cleanup is reported to onCleanupError and the original error is thrown", async () => {
+  const reported: unknown[] = [];
+  const cleanupErr = new Error("erase failed");
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      true,
+      async () => {
+        throw cleanupErr;
+      },
+      async () => {
+        throw new Error("original");
+      },
+      (e) => reported.push(e),
+    ),
+    /original/,
+  );
+  assert.deepEqual(reported, [cleanupErr]);
+});
+
+test("onCleanupError is not called when the cleanup succeeds or is not needed", async () => {
+  const reported: unknown[] = [];
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      true,
+      async () => {},
+      async () => {
+        throw new Error("boom");
+      },
+      (e) => reported.push(e),
+    ),
+    /boom/,
+  );
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      false,
+      async () => {
+        throw new Error("never runs");
+      },
+      async () => {
+        throw new Error("boom");
+      },
+      (e) => reported.push(e),
+    ),
+    /boom/,
+  );
+  assert.deepEqual(reported, []);
+});
+
+test("a throwing onCleanupError does not mask the original error", async () => {
+  await assert.rejects(
+    eraseIfCreatedOnError(
+      true,
+      async () => {
+        throw new Error("erase failed");
+      },
+      async () => {
+        throw new Error("original");
+      },
+      () => {
+        throw new Error("logger broke");
+      },
+    ),
+    /original/,
+  );
+});
+
+test("keeps a created note and returns the result when every step succeeds", async () => {
+  let erased = 0;
+  const out = await eraseIfCreatedOnError(
+    true,
+    async () => {
+      erased++;
+    },
+    async () => ({ key: "NOTE1" }),
+  );
+  assert.deepEqual(out, { key: "NOTE1" });
+  assert.equal(erased, 0);
+});
+
+test("legacyDrawingKey picks the one embedded SVG, never an ambiguous one", () => {
+  // WRAPPED embeds USER0001 and DRAW0001.
+  assert.equal(legacyDrawingKey(WRAPPED, ["DRAW0001"]), "DRAW0001");
+  // An SVG attachment the body does not embed is not a candidate.
+  assert.equal(legacyDrawingKey(WRAPPED, ["DRAW0001", "LOOSE000"]), "DRAW0001");
+  // Two embedded SVGs: cannot tell which one is the plugin's.
+  assert.equal(legacyDrawingKey(WRAPPED, ["DRAW0001", "USER0001"]), undefined);
+  assert.equal(legacyDrawingKey(WRAPPED, []), undefined);
+});
+
+test("legacy adoption can replace the img of a lone embedded SVG", () => {
+  const key = legacyDrawingKey(WRAPPED, ["USER0001"]);
+  assert.equal(key, "USER0001");
+  const out = patchDrawing(WRAPPED, key, {
+    key: "NEW00001",
+    width: 1,
+    height: 2,
+  });
+  assert.ok(!out.includes("USER0001"));
+  assert.ok(out.includes("NEW00001"));
+});
+
+test("staleDrawingKeys lists only embedded SVGs other than the kept one", () => {
+  assert.deepEqual(staleDrawingKeys(WRAPPED, ["DRAW0001", "LOOSE000"]), [
+    "DRAW0001",
+  ]);
+  assert.deepEqual(staleDrawingKeys(WRAPPED, ["DRAW0001"], "DRAW0001"), []);
+  // PNG/JPEG attachments (not in svgKeys) are never listed.
+  assert.deepEqual(staleDrawingKeys(WRAPPED, []), []);
+});
+
+function swapWorld(failSave: boolean) {
+  const log: string[] = [];
+  return {
+    log,
+    run: () =>
+      importSaveThenErase<string>({
+        importImage: async () => {
+          log.push("import");
+          return "NEW";
+        },
+        save: async (img) => {
+          log.push(`save:${img}`);
+          if (failSave) throw new Error("save failed");
+        },
+        eraseImage: async (img) => {
+          log.push(`eraseNew:${img}`);
+        },
+        eraseOld: async () => {
+          log.push("eraseOld");
+        },
+      }),
+  };
+}
+
+test("importSaveThenErase erases the old drawings only after the save", async () => {
+  const w = swapWorld(false);
+  assert.equal(await w.run(), "NEW");
+  assert.deepEqual(w.log, ["import", "save:NEW", "eraseOld"]);
+});
+
+test("importSaveThenErase keeps the old drawings and drops the new image when the save fails", async () => {
+  const w = swapWorld(true);
+  await assert.rejects(w.run(), /save failed/);
+  assert.deepEqual(w.log, ["import", "save:NEW", "eraseNew:NEW"]);
+});
+
+test("importSaveThenErase reports a failed image cleanup and still throws the save error", async () => {
+  const reported: unknown[] = [];
+  const cleanupErr = new Error("erase image failed");
+  await assert.rejects(
+    importSaveThenErase<string>({
+      importImage: async () => "NEW",
+      save: async () => {
+        throw new Error("save failed");
+      },
+      eraseImage: async () => {
+        throw cleanupErr;
+      },
+      eraseOld: async () => {},
+      onCleanupError: (e) => reported.push(e),
+    }),
+    /save failed/,
+  );
+  assert.deepEqual(reported, [cleanupErr]);
+});
+
+test("importSaveThenErase throws the save error when the image cleanup fails and nothing listens", async () => {
+  await assert.rejects(
+    importSaveThenErase<string>({
+      importImage: async () => "NEW",
+      save: async () => {
+        throw new Error("save failed");
+      },
+      eraseImage: async () => {
+        throw new Error("erase image failed");
+      },
+      eraseOld: async () => {},
+    }),
+    /save failed/,
+  );
+});
+
+test("importSaveThenErase saves a note without a drawing", async () => {
+  const log: string[] = [];
+  const img = await importSaveThenErase<string>({
+    importImage: async () => undefined,
+    save: async (i) => {
+      log.push(`save:${i}`);
+    },
+    eraseImage: async () => {
+      log.push("eraseNew");
+    },
+    eraseOld: async () => {
+      log.push("eraseOld");
+    },
+  });
+  assert.equal(img, undefined);
+  assert.deepEqual(log, ["save:undefined", "eraseOld"]);
 });
 
 test("landedPages reports the added pages that exist after a lost response", () => {
