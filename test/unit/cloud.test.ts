@@ -825,6 +825,67 @@ test("pairDevice does not validate or store when registration fails", async () =
   assert.equal(touched, false);
 });
 
+test("index blobs are cached by hash; the root pointer is not", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const cloud = fake.cloud();
+  const fileGets = () =>
+    fake.requests.filter((r) => r.startsWith("/sync/v3/files/")).length;
+  const rootGets = () =>
+    fake.requests.filter((r) => r === "/sync/v4/root").length;
+
+  const entry = await cloud.findDocument(ID);
+  assert.ok(entry);
+  assert.equal(fileGets(), 1);
+  await cloud.findDocument(ID);
+  await cloud.findDocument(OTHER);
+  assert.equal(fileGets(), 1, "root index downloaded once");
+  assert.equal(rootGets(), 3, "root pointer fetched every time");
+
+  await cloud.getDocEntries(entry);
+  await cloud.getDocEntries(entry);
+  assert.equal(fileGets(), 2, "document index downloaded once");
+
+  // A new root hash is a cache miss, so other clients' changes are seen.
+  await fake.clientCommit(ID, { [`${ID}.metadata`]: metadata("Renamed") });
+  const changed = await cloud.findDocument(ID);
+  assert.ok(changed && changed.hash !== entry.hash);
+  assert.equal(fileGets(), 3);
+  assert.equal(
+    (await cloud.getDocEntries(changed)).length,
+    fake.docEntries(ID).length,
+  );
+});
+
+test("a cached index is not mutated by callers", async () => {
+  const fake = new FakeCloud();
+  await seed(fake);
+  const cloud = fake.cloud();
+  const first = await cloud.getRootEntries(await cloud.getRoot());
+  first.length = 0;
+  const second = await cloud.getRootEntries(await cloud.getRoot());
+  assert.equal(second.length, 2);
+});
+
+test("the index cache is bounded and evicts the least recently used", async () => {
+  const fake = new FakeCloud();
+  const cloud = fake.cloud();
+  const fileGets = () =>
+    fake.requests.filter((r) => r.startsWith("/sync/v3/files/")).length;
+  const hashes: string[] = [];
+  for (let i = 0; i < 300; i++) {
+    hashes.push(await fake.store(serializeIndex(`doc${i}`, [])));
+  }
+  const get = (i: number) =>
+    cloud.getDocEntries({ id: `doc${i}`, hash: hashes[i] });
+  for (let i = 0; i < 300; i++) await get(i);
+  assert.equal(fileGets(), 300);
+  await get(299); // recent: cached
+  assert.equal(fileGets(), 300);
+  await get(0); // oldest: evicted
+  assert.equal(fileGets(), 301);
+});
+
 // Mirrors SyncEngine.push: the title handed to replacePdf comes from
 // titleToPush, so only a Zotero-side title change can rename the document.
 async function rebuild(
