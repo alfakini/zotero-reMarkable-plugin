@@ -63,6 +63,21 @@ test("skip set also covers the persistent registry of forgotten documents", () =
   assert.deepEqual([...skipKeys(undefined, ["REG1"])], ["REG1"]);
 });
 
+test("the re-upload carries over the registry even without a previous document", () => {
+  assert.deepEqual(buildDetachedList(undefined, ["REG1", "REG2"]).sort(), [
+    "REG1",
+    "REG2",
+  ]);
+  const out = buildDetachedList(
+    {
+      imported: { "p1/g/a": { zoteroKey: "ANNOA" } },
+      detachedImported: ["OLD1"],
+    },
+    ["REG1", "ANNOA"],
+  );
+  assert.deepEqual(out.sort(), ["ANNOA", "OLD1", "REG1"]);
+});
+
 test("remove imported erases imported, detached and registry keys, nothing else", () => {
   const doc = { imported, detachedImported: ["OLD1", "ANNOA"] };
   const keys = buildDetachedList(doc, ["REG1", "OLD1"]).sort();

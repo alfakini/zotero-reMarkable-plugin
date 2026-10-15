@@ -14,6 +14,7 @@ import {
   type IndexEntry,
 } from "../remarkable/cloud";
 import { pageRefs } from "../remarkable/content";
+import { uuid4 } from "../remarkable/hash";
 import { parseRm } from "../remarkable/rmscene";
 import {
   CONVERTER_VERSION,
@@ -134,9 +135,12 @@ export class SyncEngine {
         let doc = this.state.get(att.libraryID, att.key);
         const entry = doc ? rootEntries.get(doc.rmDocId) : undefined;
         if (doc && !entry) {
-          // Deleted on the tablet: forget it; it is re-uploaded below. The
-          // imported objects stay in Zotero: record them as detached so they
-          // are not burned into the re-uploaded PDF.
+          // Deleted on the tablet, or an upload recorded in push() whose
+          // commit never happened: forget it; it is re-uploaded below. The
+          // imported objects stay in Zotero: forget() moves their keys into
+          // the persistent registry right here, so they stay out of the
+          // re-uploaded PDF even if push() fails before recording the new
+          // document, and push() reads them back from the registry.
           this.state.forget(att.libraryID, att.key);
           doc = undefined;
         }
@@ -231,7 +235,7 @@ export class SyncEngine {
       // A different page count means a new tablet document. What was imported
       // from the old one stays in Zotero but is detached from tracking, so it
       // is neither erased by a pull nor burned into the new PDF.
-      const detachedImported = buildDetachedList(doc);
+      const detachedImported = buildDetachedList(doc, detached);
       if (doc) {
         await this.cloud.trashDocument(doc.rmDocId);
         Zotero.debug(
@@ -240,12 +244,11 @@ export class SyncEngine {
             `uploading a new document, detaching ${detachedImported.length} imported object(s)`,
         );
       }
-      const rmDocId = await this.cloud.uploadPdf(
-        remarkableTitle(att),
-        built.bytes,
-        pageCount,
-        folderId,
-      );
+      // Record the id before the commit. The root PUT is never retried, so if
+      // the server applies it but the response is lost, the next sync either
+      // finds no entry (forgets it and uploads again) or adopts the entry; its
+      // missing fingerprint then makes push replace the PDF.
+      const rmDocId = uuid4();
       doc = {
         attachmentKey: att.key,
         libraryID: att.libraryID,
@@ -258,8 +261,17 @@ export class SyncEngine {
           ? detachedImported
           : undefined,
       };
+      this.state.set(doc);
+      await this.state.save();
+      const uploaded = await this.cloud.uploadPdf(
+        remarkableTitle(att),
+        built.bytes,
+        pageCount,
+        folderId,
+        rmDocId,
+      );
       report.uploaded++;
-      doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
+      doc.rmDocHash = uploaded.hash;
     }
     doc.appendedPageCount = built.appendedPageCount;
     doc.pageBoxes = built.pageBoxes;
