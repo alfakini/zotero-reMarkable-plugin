@@ -26,11 +26,16 @@ export class RemarkableService {
         deviceToken: getPref("deviceToken"),
         clientId: this.deviceId(),
       });
-      this.engine = new SyncEngine(cloud, this.state, () => ({
-        folder: getPref("folder") ?? "",
-        appendNotesPages: getPref("appendNotesPages"),
-        importHandwriting: getPref("importHandwriting"),
-      }));
+      this.engine = new SyncEngine(
+        cloud,
+        this.state,
+        () => ({
+          folder: getPref("folder") ?? "",
+          appendNotesPages: getPref("appendNotesPages"),
+          importHandwriting: getPref("importHandwriting"),
+        }),
+        this.deviceId(),
+      );
     }
     return this.engine;
   }
@@ -157,6 +162,7 @@ export class RemarkableService {
         updated: report.updated,
         imported: report.imported,
         removed: report.removed,
+        notes: report.notes,
       },
     });
     if (win) {

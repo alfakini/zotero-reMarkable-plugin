@@ -14,10 +14,23 @@ export interface ImportedRecord {
   kind: "annotation" | "note";
 }
 
+export interface NotePageRecord {
+  /** Key of the paired Zotero child note. */
+  noteKey: string;
+  /** Body text both sides had after the last sync (three-way merge base). */
+  base?: string;
+  /** Fingerprint of the handwriting drawing last copied into the note. */
+  drawingHash?: string;
+  /** Adopted from the older one-way import; base is set on first sync. */
+  migrated?: boolean;
+}
+
 export interface DocState {
   attachmentKey: string;
   libraryID: number;
   rmDocId: string;
+  /** Version of the import conversion used for `imported`. */
+  converterVersion?: number;
   /** Hash of the reMarkable document entry when we last synced. */
   rmDocHash?: string;
   /** Fingerprint of the Zotero annotations burned into the uploaded PDF. */
@@ -26,6 +39,10 @@ export interface DocState {
   appendedPageCount: number;
   /** Original PDF page boxes (CropBox) used for coordinate mapping. */
   pageBoxes: { x: number; y: number; width: number; height: number }[];
+  /** Notebook page id -> paired "reMarkable Note" child note. */
+  notePages?: Record<string, NotePageRecord>;
+  /** Fingerprint of synced notes at the last note sync. */
+  notesFingerprint?: string;
   /** reMarkable item id (page:item) -> imported Zotero object. */
   imported: Record<string, ImportedRecord>;
   lastSync?: string;

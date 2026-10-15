@@ -57,18 +57,54 @@ export interface RmGlyph {
   rects: RmRect[];
 }
 
+export const ParagraphStyle = {
+  BASIC: 0,
+  PLAIN: 1,
+  HEADING: 2,
+  BOLD: 3,
+  BULLET: 4,
+  BULLET2: 5,
+  CHECKBOX: 6,
+  CHECKBOX_CHECKED: 7,
+} as const;
+
+export interface RmParagraph {
+  style: number;
+  text: string;
+}
+
+/** A run of text in the CRDT sequence, as stored in the file. */
+export interface RmTextItem {
+  id: CrdtId;
+  left: CrdtId;
+  right: CrdtId;
+  /** Number of characters (live or deleted) covered by this run. */
+  length: number;
+  deleted: boolean;
+}
+
 export interface RmText {
   /** Plain text, paragraphs separated by "\n". */
   text: string;
   x: number;
   y: number;
   width: number;
+  paragraphs: RmParagraph[];
+  items: RmTextItem[];
+  /** Id of the last character in document order (live or deleted). */
+  lastCharId?: CrdtId;
 }
 
 export interface RmPage {
   lines: RmLine[];
   glyphs: RmGlyph[];
   text?: RmText;
+  /** The root text block, even when it holds no visible text. */
+  rootText?: RmText;
+  /** Highest CRDT counter used anywhere in the file (for new ids). */
+  maxCounter: number;
+  /** Author id -> UUID bytes (little-endian), from the AuthorIds block. */
+  authors: { id: number; uuid: Uint8Array }[];
 }
 
 export const Tool = {
@@ -165,8 +201,15 @@ class Reader {
       mul *= 128;
     }
   }
+  /** Highest CRDT counter seen (sentinels near 2^64 are ignored). */
+  maxCounter = 0;
+
   crdtId(): CrdtId {
-    return { part1: this.u8(), part2: this.varuint() };
+    const id = { part1: this.u8(), part2: this.varuint() };
+    if (id.part2 < 2 ** 40 && id.part2 > this.maxCounter) {
+      this.maxCounter = id.part2;
+    }
+    return id;
   }
 }
 
@@ -396,6 +439,8 @@ interface TextChar {
 function readRootTextBlock(t: TaggedReader): RmText {
   t.id(1);
   const chars: TextChar[] = [];
+  const items: RmTextItem[] = [];
+  const styles = new Map<string, number>();
   t.subblock(2, () => {
     t.subblock(1, () =>
       t.subblock(1, () => {
@@ -403,14 +448,28 @@ function readRootTextBlock(t: TaggedReader): RmText {
         for (let i = 0; i < n; i++) {
           t.subblock(0, () => {
             const id = t.id(2);
-            const left = idKey(t.id(3));
-            const right = idKey(t.id(4));
+            const leftId = t.id(3);
+            const rightId = t.id(4);
+            const left = idKey(leftId);
+            const right = idKey(rightId);
             const deleted = t.int(5);
             let value: string | number = "";
             if (t.hasSubblock(6)) value = t.stringWithFormat(6);
             const runLen =
               typeof value === "number" ? 1 : [...value].length || deleted;
             const glyphs = typeof value === "number" ? [value] : [...value];
+            // Each character of a run consumes a counter value.
+            const lastCounter = id.part2 + runLen - 1;
+            if (lastCounter < 2 ** 40 && lastCounter > t.r.maxCounter) {
+              t.r.maxCounter = lastCounter;
+            }
+            items.push({
+              id,
+              left: leftId,
+              right: rightId,
+              length: runLen,
+              deleted: !!deleted && typeof value === "string" && !value,
+            });
             for (let k = 0; k < runLen; k++) {
               chars.push({
                 id: idKey({ part1: id.part1, part2: id.part2 + k }),
@@ -432,14 +491,50 @@ function readRootTextBlock(t: TaggedReader): RmText {
         }
       }),
     );
-    // Paragraph styles (subblock 2) are not needed for plain text.
+    // Paragraph styles, keyed by the id of the paragraph's leading "\n"
+    // ((0,0) for the first paragraph).
+    if (t.hasSubblock(2)) {
+      t.subblock(2, () =>
+        t.subblock(1, () => {
+          const n = t.r.varuint();
+          for (let i = 0; i < n; i++) {
+            const charId = t.r.crdtId();
+            t.id(1);
+            const style = t.subblock(2, () => {
+              t.r.u8(); // always 17
+              return t.r.u8();
+            });
+            styles.set(idKey(charId), style);
+          }
+        }),
+      );
+    }
   });
   const pos = t.subblock(3, () => ({ x: t.r.f64(), y: t.r.f64() }));
   const width = t.float(4);
-  const text = toposort(chars)
-    .map((c) => (typeof c.value === "string" ? c.value : ""))
-    .join("");
-  return { text, x: pos.x, y: pos.y, width };
+  const ordered = toposort(chars);
+  const paragraphs: RmParagraph[] = [];
+  let current: RmParagraph = {
+    style: styles.get("0:0") ?? ParagraphStyle.PLAIN,
+    text: "",
+  };
+  for (const c of ordered) {
+    if (typeof c.value !== "string") continue;
+    if (c.value === "\n") {
+      paragraphs.push(current);
+      current = { style: styles.get(c.id) ?? ParagraphStyle.PLAIN, text: "" };
+    } else current.text += c.value;
+  }
+  paragraphs.push(current);
+  const text = paragraphs.map((p) => p.text).join("\n");
+  const last = ordered[ordered.length - 1];
+  const lastCharId = last
+    ? (() => {
+        const [p1, p2] = last.id.split(":").map(Number);
+        return { part1: p1, part2: p2 };
+      })()
+    : undefined;
+  return { text, x: pos.x, y: pos.y, width, paragraphs, items, lastCharId };
 }
 
 /** Order CRDT sequence items by their left/right links (rmscene algorithm). */
@@ -487,6 +582,7 @@ export function toposort<T extends { id: string; left: string; right: string }>(
 }
 
 const BLOCK = {
+  AuthorIds: 0x09,
   SceneTree: 0x01,
   TreeNode: 0x02,
   GlyphItem: 0x03,
@@ -508,6 +604,7 @@ export function parseRm(data: Uint8Array): RmPage {
   const lines: RmLine[] = [];
   const glyphs: RmGlyph[] = [];
   let text: RmText | undefined;
+  const authors: RmPage["authors"] = [];
   const hidden = new Set<string>();
   /** child group -> parent group */
   const groupParent = new Map<string, string>();
@@ -556,6 +653,17 @@ export function parseRm(data: Uint8Array): RmPage {
             });
             break;
           }
+          case BLOCK.AuthorIds: {
+            const n = t.r.varuint();
+            for (let i = 0; i < n; i++) {
+              t.subblock(0, () => {
+                const len = t.r.varuint();
+                const uuid = t.r.bytes(len).slice();
+                authors.push({ id: t.r.u16(), uuid });
+              });
+            }
+            break;
+          }
           case BLOCK.RootText:
             text = readRootTextBlock(t);
             break;
@@ -583,5 +691,8 @@ export function parseRm(data: Uint8Array): RmPage {
     lines: lines.filter((l) => !isHidden(l.parent)),
     glyphs: glyphs.filter((g) => !isHidden(g.parent)),
     text: text && text.text.trim() ? text : undefined,
+    rootText: text,
+    maxCounter: r.maxCounter,
+    authors,
   };
 }

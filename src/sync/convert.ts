@@ -27,6 +27,12 @@ import {
 } from "../remarkable/rmscene";
 import type { PageBox, ZPosition } from "./types";
 
+/**
+ * Bump when the conversion output changes, so already-synced documents are
+ * re-imported (imported objects are updated in place, keyed by rmKey).
+ */
+export const CONVERTER_VERSION = 3;
+
 /** reMarkable units per PDF point (rM2 / Paper Pro render PDFs at 226 dpi). */
 export const RM_DPI = 226;
 const S = 72 / RM_DPI;
@@ -96,6 +102,8 @@ export interface ConvertInput {
   originalPageCount: number;
   pageBoxes: PageBox[];
   pageLabels?: string[];
+  /** Leave notebook pages without a PDF page to the two-way note sync. */
+  skipInsertedPages?: boolean;
 }
 
 // ---------------------------------------------------------------- colours --
@@ -233,29 +241,74 @@ function avgWidth(line: RmLine) {
 }
 
 /**
- * Group pen strokes into clusters of nearby strokes (≈ one handwritten word,
- * underline or drawing). Union-find over padded bounding boxes.
+ * Group pen strokes into what was written together: a word, a sentence on
+ * one line, a few stacked lines of a margin note, or a drawing.
+ *
+ *  1. Strokes whose (padded) boxes touch form "words".
+ *  2. Words on the same line merge when the horizontal gap is within about
+ *     2.5 line heights (normal word spacing), and lines stacked closely on
+ *     top of each other merge when the vertical gap is within ~1.2 line
+ *     heights and they overlap horizontally.
+ *
+ * Only strokes of the same colour are grouped.
  */
 export function clusterLines(lines: RmLine[], gap = 30): RmLine[][] {
+  // Pass 1: touching strokes.
   const boxes = lines.map((l) => lineBBox(l, gap / 2));
-  const parent = lines.map((_, i) => i);
+  const words = unionFind(
+    lines.length,
+    (i, j) =>
+      inkColor(lines[i]) === inkColor(lines[j]) && overlaps(boxes[i], boxes[j]),
+  ).map((idx) => idx.map((i) => lines[i]));
+
+  // Pass 2: words -> lines -> paragraphs.
+  const wb = words.map((w) => groupBBox(w));
+  const color = words.map((w) => inkColor(w[0]));
+  const merged = unionFind(words.length, (i, j) => {
+    if (color[i] !== color[j]) return false;
+    const a = wb[i];
+    const b = wb[j];
+    const h = Math.max(40, Math.min(a.y2 - a.y1, b.y2 - b.y1));
+    const dx = Math.max(0, Math.max(a.x1, b.x1) - Math.min(a.x2, b.x2));
+    const dy = Math.max(0, Math.max(a.y1, b.y1) - Math.min(a.y2, b.y2));
+    const vOverlap = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1);
+    const sameLine =
+      vOverlap >= 0.4 * Math.min(a.y2 - a.y1, b.y2 - b.y1, h) && dx <= 2.5 * h;
+    const stacked = dx <= 0.5 * h && dy <= 1.2 * h;
+    return sameLine || stacked;
+  });
+  return merged.map((idx) => idx.flatMap((i) => words[i]));
+}
+
+function groupBBox(lines: RmLine[]): BBox {
+  return lines
+    .map((l) => lineBBox(l))
+    .reduce((a, c) => ({
+      x1: Math.min(a.x1, c.x1),
+      y1: Math.min(a.y1, c.y1),
+      x2: Math.max(a.x2, c.x2),
+      y2: Math.max(a.y2, c.y2),
+    }));
+}
+
+/** Connected components of `n` nodes under the `linked` relation. */
+function unionFind(
+  n: number,
+  linked: (i: number, j: number) => boolean,
+): number[][] {
+  const parent = Array.from({ length: n }, (_, i) => i);
   const find = (i: number): number =>
     parent[i] === i ? i : (parent[i] = find(parent[i]));
-  for (let i = 0; i < lines.length; i++) {
-    for (let j = i + 1; j < lines.length; j++) {
-      if (
-        inkColor(lines[i]) === inkColor(lines[j]) &&
-        overlaps(boxes[i], boxes[j])
-      ) {
-        parent[find(i)] = find(j);
-      }
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (find(i) !== find(j) && linked(i, j)) parent[find(i)] = find(j);
     }
   }
-  const groups = new Map<number, RmLine[]>();
-  lines.forEach((l, i) => {
+  const groups = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
     const root = find(i);
-    groups.set(root, [...(groups.get(root) ?? []), l]);
-  });
+    groups.set(root, [...(groups.get(root) ?? []), i]);
+  }
   return [...groups.values()];
 }
 
@@ -308,6 +361,7 @@ export function convertPages(input: ConvertInput): Candidate[] {
       ref.pdfIndex < input.originalPageCount &&
       !!input.pageBoxes[ref.pdfIndex];
     if (!onPdfPage) {
+      if (input.skipInsertedPages && ref.pdfIndex === undefined) continue;
       const note = pageToNote(ref, page, input);
       if (note) out.push(note);
       continue;
@@ -386,14 +440,7 @@ export function convertPages(input: ConvertInput): Candidate[] {
     // Pen strokes -> ink clusters; clusters off the page become a note.
     const offPage: RmLine[] = [];
     for (const cluster of clusterLines(pens)) {
-      const b = cluster
-        .map((l) => lineBBox(l))
-        .reduce((a, c) => ({
-          x1: Math.min(a.x1, c.x1),
-          y1: Math.min(a.y1, c.y1),
-          x2: Math.max(a.x2, c.x2),
-          y2: Math.max(a.y2, c.y2),
-        }));
+      const b = groupBBox(cluster);
       if (!tf.inside(tf.x((b.x1 + b.x2) / 2), tf.y((b.y1 + b.y2) / 2))) {
         offPage.push(...cluster);
         continue;

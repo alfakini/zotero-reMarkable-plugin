@@ -1,5 +1,7 @@
 /** Zotero-side helpers: read Zotero data and write imported annotations. */
 import type { AnnotationCandidate, NoteCandidate } from "./convert";
+import { isSyncedNoteTitle, paragraphsToHtml } from "./notes";
+import type { RmParagraph } from "../remarkable/rmscene";
 import type { DocState } from "./state";
 import type { ZAnnotation, ZNote } from "./types";
 
@@ -82,14 +84,18 @@ export function zoteroNotes(attachment: Zotero.Item, doc?: DocState): ZNote[] {
   const parent = attachment.parentItem;
   if (!parent) return [];
   const skip = importedKeys(doc);
-  return Zotero.Items.get(parent.getNotes())
-    .filter((n) => !skip.has(n.key))
-    .map((n) => ({
-      key: n.key,
-      title: n.getNoteTitle(),
-      text: htmlToText(n.getNote()),
-    }))
-    .filter((n) => n.text.trim());
+  for (const rec of Object.values(doc?.notePages ?? {})) skip.add(rec.noteKey);
+  return (
+    Zotero.Items.get(parent.getNotes())
+      // Notes with their own page on the tablet are not repeated in the PDF.
+      .filter((n) => !skip.has(n.key) && !isSyncedNoteTitle(n.getNoteTitle()))
+      .map((n) => ({
+        key: n.key,
+        title: n.getNoteTitle(),
+        text: htmlToText(n.getNote()),
+      }))
+      .filter((n) => n.text.trim())
+  );
 }
 
 export function htmlToText(html: string): string {
@@ -227,4 +233,66 @@ export function existsByKey(libraryID: number, key: string) {
     | Zotero.Item
     | false;
   return !!item && !item.deleted;
+}
+
+/** Live (not trashed) child notes of the attachment's parent item. */
+export function childNotes(attachment: Zotero.Item): Zotero.Item[] {
+  const parent = attachment.parentItem;
+  if (!parent) return [];
+  return Zotero.Items.get(parent.getNotes()).filter((n) => !n.deleted);
+}
+
+/** Move an item to Zotero's trash (recoverable). */
+export async function trashByKey(libraryID: number, key: string) {
+  const item = Zotero.Items.getByLibraryAndKey(libraryID, key) as
+    | Zotero.Item
+    | false;
+  if (item && !item.deleted) {
+    item.deleted = true;
+    await item.saveTx();
+  }
+}
+
+/**
+ * Create or rewrite a note paired with a tablet page: title, body, and the
+ * page's handwriting as an embedded SVG drawing.
+ */
+export async function writeSyncedNote(
+  attachment: Zotero.Item,
+  key: string | undefined,
+  title: string,
+  body: RmParagraph[],
+  drawing?: { markup: string; width: number; height: number },
+): Promise<string> {
+  const parentID = attachment.parentID;
+  if (!parentID) throw new Error("Notes need a parent item");
+  let note = key
+    ? (Zotero.Items.getByLibraryAndKey(attachment.libraryID, key) as
+        | Zotero.Item
+        | false)
+    : false;
+  if (!note) {
+    note = new Zotero.Item("note");
+    note.libraryID = attachment.libraryID;
+    note.parentID = parentID;
+    note.setNote(paragraphsToHtml(title, body));
+    note.addTag(IMPORT_TAG);
+    await note.saveTx();
+  }
+  // Replace the previous drawing, if any.
+  for (const id of note.getAttachments()) {
+    const img = Zotero.Items.get(id) as Zotero.Item | false;
+    if (img) await img.eraseTx();
+  }
+  let image: { key: string; width: number; height: number } | undefined;
+  if (drawing) {
+    const img = await Zotero.Attachments.importEmbeddedImage({
+      blob: new Blob([drawing.markup], { type: "image/svg+xml" }),
+      parentItemID: note.id,
+    });
+    image = { key: img.key, width: drawing.width, height: drawing.height };
+  }
+  note.setNote(paragraphsToHtml(title, body, image));
+  await note.saveTx();
+  return note.key;
 }

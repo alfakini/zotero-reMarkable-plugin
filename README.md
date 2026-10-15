@@ -25,15 +25,36 @@ Zotero ──── PDF + Zotero highlights/notes ────▶ reMarkable
 
 **reMarkable → Zotero**
 
-| On the tablet | In Zotero |
-| --- | --- |
-| Text highlight (select text with the highlighter) | `highlight` annotation with the highlighted text, colour mapped to the nearest Zotero colour |
-| Freehand highlighter / shader stroke | `highlight` annotation covering the stroke |
-| Pen, pencil, marker, etc. strokes on a PDF page | `ink` annotations, grouped into word/drawing-sized clusters so each can be deleted or recoloured on its own |
-| Typed text on a PDF page | `note` (sticky note) annotation |
-| Writing on an inserted notebook page, on the appended "Zotero notes" page, or in the margin outside the PDF page | Child **note** with an SVG drawing of the handwriting (plus any typed text) |
+| On the tablet                                                                           | In Zotero                                                                                                   |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Text highlight (select text with the highlighter)                                       | `highlight` annotation with the highlighted text, colour mapped to the nearest Zotero colour                |
+| Freehand highlighter / shader stroke                                                    | `highlight` annotation covering the stroke                                                                  |
+| Pen, pencil, marker, etc. strokes on a PDF page                                         | `ink` annotations, grouped into word/drawing-sized clusters so each can be deleted or recoloured on its own |
+| Typed text on a PDF page                                                                | `note` (sticky note) annotation                                                                             |
+| Pen strokes in the margin, outside the PDF page, or on the appended "Zotero notes" page | Child **note** with an SVG drawing of the handwriting                                                       |
 
 Imported annotations get the tag `reMarkable` and author name "reMarkable".
+
+### Notes ↔ note pages (two-way)
+
+A child note whose title starts with **`reMarkable Note`** (e.g. `reMarkable Note 1`,
+`reMarkable Note 2 – Methods`) is paired with its own blank notebook page at the end of
+the document on the tablet:
+
+- The note's body (everything after the title line) is written on the page as
+  reMarkable **typed text**, so you can keep editing it on the tablet. Headings and
+  bullet lists carry over in both directions; other formatting is kept as plain text.
+- Text you type on that page comes back into the Zotero note. Handwriting on the page
+  is added to the note as a drawing.
+- A notebook page you add on the tablet becomes a new note, `reMarkable Note <n>`.
+- If the note and the page both changed since the last sync, nothing is lost: the
+  note and the page get Zotero's text followed by the tablet's under a
+  "Edited on reMarkable at the same time" heading.
+- Deleting the page on the tablet moves the note to Zotero's trash; deleting the note
+  in Zotero deletes the page.
+
+Other child notes are read-only on the tablet: they are listed on the appended
+"Zotero notes" page.
 
 ### Safety rules
 
@@ -41,7 +62,7 @@ Imported annotations get the tag `reMarkable` and author name "reMarkable".
   sync. Only objects the plugin imported are updated (when you change them on the
   tablet) or removed (when you erase them on the tablet).
 - If you delete an imported annotation in Zotero, it is not re-imported.
-  *Re-import reMarkable annotations* brings everything back.
+  _Re-import reMarkable annotations_ brings everything back.
 - The original PDF file in Zotero is never changed; the annotated copy only exists
   on the tablet.
 - Imported annotations are never burned back into the uploaded PDF, so nothing

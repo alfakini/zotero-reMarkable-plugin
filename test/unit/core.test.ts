@@ -250,3 +250,32 @@ test("respace restores spacing and hyphenation from page text", async () => {
   );
   assert.equal(respace("not on page", page), "not on page");
 });
+
+test("handwriting written together becomes one ink annotation", async () => {
+  const { clusterLines } = await import("../../src/sync/convert");
+  // "Test Handwrite" written on one line on a Paper Pro.
+  const page = parseRm(fixture("code_as_policies_p1_handwriting.rm"));
+  assert.equal(page.lines.length, 23);
+  assert.equal(clusterLines(page.lines).length, 1);
+
+  const stroke = (id: string, x: number, y: number, w = 40, h = 40) => ({
+    id,
+    parent: "0:11",
+    tool: 17,
+    color: 0,
+    thicknessScale: 2,
+    points: [
+      { x, y, speed: 0, direction: 0, width: 19, pressure: 100 },
+      { x: x + w, y: y + h, speed: 0, direction: 0, width: 19, pressure: 100 },
+    ],
+  });
+  // Two lines of a margin note, stacked closely -> one group.
+  const stacked = [stroke("1:1", 0, 0, 200), stroke("1:2", 10, 60, 180)];
+  assert.equal(clusterLines(stacked).length, 1);
+  // Notes in different places on the page stay separate.
+  const apart = [stroke("1:1", 0, 0), stroke("1:2", 600, 900)];
+  assert.equal(clusterLines(apart).length, 2);
+  // Same line but far apart (opposite margins) stay separate.
+  const farOnLine = [stroke("1:1", -700, 100), stroke("1:2", 600, 100)];
+  assert.equal(clusterLines(farOnLine).length, 2);
+});

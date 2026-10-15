@@ -137,15 +137,25 @@ export class RemarkableCloud {
   }
 
   async refreshUserToken() {
-    const res = await this.fetch(`${AUTH_HOST}/token/json/2/user/new`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.opts.deviceToken}` },
-    });
-    const text = await res.text();
-    if (!res.ok) {
+    let res: Response | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await this.fetch(`${AUTH_HOST}/token/json/2/user/new`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${this.opts.deviceToken}` },
+        });
+        if (res.status < 500 && res.status !== 429) break;
+      } catch (e) {
+        if (attempt >= 3) throw e;
+      }
+      if (attempt >= 3) break;
+      await sleep(backoff(attempt) + 500);
+    }
+    const text = await res!.text();
+    if (!res!.ok) {
       throw new RemarkableError(
-        `Could not authenticate with reMarkable (${res.status}): ${text}`,
-        res.status,
+        `Could not authenticate with reMarkable (${res!.status}): ${text}`,
+        res!.status,
       );
     }
     this.userToken = text.trim();
@@ -485,6 +495,33 @@ export class RemarkableCloud {
     updates.push({ name: `${id}.content`, data: JSON.stringify(content) });
     const entry = await this.putDocument(id, updates, files);
     await this.commitDocument(entry);
+  }
+
+  /**
+   * Write page files and/or a new `.content` for a document in one commit.
+   * `pages` maps page id -> `.rm` bytes.
+   */
+  async updateDocument(
+    id: string,
+    changes: { pages?: Map<string, Uint8Array>; content?: unknown },
+  ) {
+    const docEntry = await this.findDocument(id);
+    if (!docEntry) throw new RemarkableError(`Document ${id} not found`, 404);
+    const files = await this.getDocEntries(docEntry);
+    const updates: { name: string; data: Uint8Array | string }[] = [];
+    for (const [pageId, data] of changes.pages ?? []) {
+      updates.push({ name: `${id}/${pageId}.rm`, data });
+    }
+    if (changes.content !== undefined) {
+      updates.push({
+        name: `${id}.content`,
+        data: JSON.stringify(changes.content),
+      });
+    }
+    if (!updates.length) return docEntry.hash;
+    const entry = await this.putDocument(id, updates, files);
+    await this.commitDocument(entry);
+    return entry.hash;
   }
 
   /** Move a document to the trash (the tablet then deletes it). */

@@ -1,11 +1,12 @@
 /**
  * Sync orchestration. A sync of one attachment is:
- *   1. pull: download the tablet's annotations and turn them into Zotero
+ *   1. pull: if the tablet copy changed, turn its annotations into Zotero
  *      annotations / notes (only objects this plugin created are ever
  *      updated or deleted);
  *   2. push: if the Zotero annotations or notes changed since the last
  *      upload, rebuild the PDF and replace it on the tablet, keeping the
- *      tablet's own annotations in place.
+ *      tablet's own annotations in place;
+ *   3. notes: two-way sync of "reMarkable Note …" notes with their pages.
  */
 import {
   RemarkableCloud,
@@ -14,7 +15,17 @@ import {
 } from "../remarkable/cloud";
 import { pageRefs } from "../remarkable/content";
 import { parseRm, type RmPage } from "../remarkable/rmscene";
-import { convertPages, fingerprint, respace } from "./convert";
+import {
+  CONVERTER_VERSION,
+  convertPages,
+  fingerprint,
+  respace,
+} from "./convert";
+import {
+  migrateImportedPageNotes,
+  notesFingerprint,
+  syncNotes,
+} from "./noteSync";
 import { buildRemarkablePdf } from "./pdfExport";
 import { SyncStateStore, type DocState } from "./state";
 import {
@@ -39,6 +50,8 @@ export interface SyncReport {
   updated: number;
   imported: number;
   removed: number;
+  /** Notes pushed to / pulled from / created as tablet note pages. */
+  notes: number;
   errors: string[];
 }
 
@@ -51,6 +64,8 @@ export class SyncEngine {
     private cloud: RemarkableCloud,
     private state: SyncStateStore,
     private settings: () => SyncSettings,
+    /** Stable uuid of this installation (CRDT author on the tablet). */
+    private authorId: string,
   ) {}
 
   get busy() {
@@ -92,6 +107,7 @@ export class SyncEngine {
       updated: 0,
       imported: 0,
       removed: 0,
+      notes: 0,
       errors: [],
     };
     if (!attachments.length) return report;
@@ -112,11 +128,32 @@ export class SyncEngine {
           this.state.delete(att.libraryID, att.key);
           doc = undefined;
         }
-        if (doc && entry) await this.pull(att, doc, entry, report);
+        // Must run before pull(), which would otherwise erase notes that
+        // older versions imported one-way from notebook pages.
+        if (doc && att.parentID) migrateImportedPageNotes(doc);
+        const tabletChanged =
+          !!doc &&
+          !!entry &&
+          (doc.rmDocHash !== entry.hash ||
+            doc.converterVersion !== CONVERTER_VERSION);
+        if (doc && entry && tabletChanged) {
+          await this.pull(att, doc, entry, report);
+        }
         folderId ??= this.settings().folder
           ? await this.cloud.ensureFolder(this.settings().folder)
           : "";
         await this.push(att, doc, folderId, report);
+        doc = this.state.get(att.libraryID, att.key);
+        if (doc && att.parentID) {
+          const notesPrint = notesFingerprint(att, doc);
+          if (tabletChanged || notesPrint !== doc.notesFingerprint) {
+            const r = await syncNotes(this.cloud, att, doc, this.authorId);
+            report.notes += r.toTablet + r.toZotero + r.created + r.removed;
+            if (r.newHash) doc.rmDocHash = r.newHash;
+            doc.notesFingerprint = notesFingerprint(att, doc);
+            this.state.set(doc);
+          }
+        }
       } catch (e) {
         const err = e as Error;
         Zotero.logError(err);
@@ -203,7 +240,6 @@ export class SyncEngine {
     entry: IndexEntry,
     report: SyncReport,
   ) {
-    if (doc.rmDocHash === entry.hash) return;
     const files = await this.cloud.getDocumentFiles(doc.rmDocId, entry);
     if (!files) return;
     const pages: { ref: ReturnType<typeof pageRefs>[number]; page: RmPage }[] =
@@ -224,6 +260,8 @@ export class SyncEngine {
       originalPageCount: doc.originalPageCount,
       pageBoxes: doc.pageBoxes,
       pageLabels: knownPageLabels(att),
+      // Notebook pages pair with notes (noteSync) when the item can hold notes.
+      skipInsertedPages: !!att.parentID,
     });
     // Restore word spacing in highlighted text from Zotero's text extraction.
     if (candidates.some((c) => c.kind === "annotation" && c.json.text)) {
@@ -244,6 +282,7 @@ export class SyncEngine {
     }
 
     const seen = new Set<string>();
+    let savedImages = false;
     for (const c of candidates) {
       seen.add(c.rmKey);
       const rec = doc.imported[c.rmKey];
@@ -257,6 +296,7 @@ export class SyncEngine {
           ? await saveAnnotation(att, c, rec?.zoteroKey)
           : await saveNote(att, c, rec?.zoteroKey);
       doc.imported[c.rmKey] = { zoteroKey: key, hash: c.hash, kind: c.kind };
+      if (c.kind === "annotation" && c.json.type === "ink") savedImages = true;
       report.imported++;
     }
     // Erased on the tablet -> remove what we imported from it.
@@ -266,7 +306,18 @@ export class SyncEngine {
       delete doc.imported[rmKey];
       report.removed++;
     }
+    // Render preview images for new/changed ink now. Zotero's annotation list
+    // renders missing previews itself, and the "modified" notification that
+    // fires mid-render makes it show the annotation twice.
+    if (savedImages) {
+      try {
+        await Zotero.PDFWorker.renderAttachmentAnnotations(att.id);
+      } catch (e) {
+        Zotero.debug(`[reMarkable] preview render failed: ${e}`);
+      }
+    }
     doc.rmDocHash = entry.hash;
+    doc.converterVersion = CONVERTER_VERSION;
     doc.lastSync = new Date().toISOString();
     this.state.set(doc);
   }

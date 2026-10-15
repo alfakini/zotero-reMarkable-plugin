@@ -160,3 +160,53 @@ export function reconcileContent(
   c.sizeInBytes = String(sizeInBytes);
   return c;
 }
+
+function contentAuthor(c: any, authorId: string) {
+  const cp = c.cPages;
+  cp.uuids ??= [];
+  let author = cp.uuids.find((u: any) => u.first === authorId)?.second;
+  if (!author) {
+    author = Math.max(0, ...cp.uuids.map((u: any) => u.second ?? 0)) + 1;
+    cp.uuids.push({ first: authorId, second: author });
+  }
+  return `${author}:${Date.now() % 1_000_000}`;
+}
+
+/**
+ * Append a blank notebook page (no PDF page behind it) at the end of the
+ * document. Returns the updated content; the page's file is `<docId>/<pageId>.rm`.
+ */
+export function addInsertedPage(
+  content: any,
+  pageId: string,
+  authorId: string,
+) {
+  const c = JSON.parse(JSON.stringify(content));
+  if (!c.cPages?.pages) throw new Error("document has no page map yet");
+  const ts = contentAuthor(c, authorId);
+  const maxIdx = c.cPages.pages.reduce(
+    (m: string, p: any) => (p.idx?.value > m ? p.idx.value : m),
+    "",
+  );
+  c.cPages.pages.push({
+    id: pageId,
+    // Same shape as pages inserted on the tablet (no template => blank).
+    idx: { timestamp: ts, value: `${maxIdx || "b"}n` },
+  });
+  c.pageCount = c.cPages.pages.filter(
+    (p: any) => p.deleted?.value !== 1,
+  ).length;
+  return c;
+}
+
+/** Mark a page deleted (the tablet removes it on its next sync). */
+export function deletePage(content: any, pageId: string, authorId: string) {
+  const c = JSON.parse(JSON.stringify(content));
+  const page = c.cPages?.pages?.find((p: any) => p.id === pageId);
+  if (!page) return c;
+  page.deleted = { timestamp: contentAuthor(c, authorId), value: 1 };
+  c.pageCount = c.cPages.pages.filter(
+    (p: any) => p.deleted?.value !== 1,
+  ).length;
+  return c;
+}
