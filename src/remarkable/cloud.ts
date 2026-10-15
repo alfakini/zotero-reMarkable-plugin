@@ -212,12 +212,21 @@ export async function pairDevice(steps: {
   steps.store(token);
 }
 
+/** Max cached index blobs (root and document indexes). */
+const INDEX_CACHE_MAX = 256;
+
 export class RemarkableCloud {
   private fetch: FetchFn;
   private userToken?: string;
   private host: string;
   /** docSchema hash -> parsed metadata, so unchanged docs aren't refetched. */
   private metaCache = new Map<string, RmItem>();
+  /**
+   * .docSchema blob hash -> text. Blobs are content-addressed and immutable, so
+   * caching by hash is always correct; the root pointer (getRoot) is never
+   * cached. Bounded with least-recently-used eviction.
+   */
+  private indexCache = new Map<string, string>();
 
   constructor(private opts: CloudOptions) {
     this.fetch = opts.fetch;
@@ -366,17 +375,38 @@ export class RemarkableCloud {
     return hash;
   }
 
+  /** Text of an index (.docSchema) blob, cached by its immutable hash. */
+  private async getIndexText(hash: string, filename: string): Promise<string> {
+    const cached = this.indexCache.get(hash);
+    if (cached !== undefined) {
+      // Re-insert to mark as most recently used.
+      this.indexCache.delete(hash);
+      this.indexCache.set(hash, cached);
+      return cached;
+    }
+    const text = await this.getText(hash, filename);
+    this.indexCache.set(hash, text);
+    while (this.indexCache.size > INDEX_CACHE_MAX) {
+      const oldest = this.indexCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.indexCache.delete(oldest);
+    }
+    return text;
+  }
+
   async getRootEntries(root: RootInfo): Promise<IndexEntry[]> {
     if (!root.hash) return [];
-    return parseIndex(await this.getText(root.hash, "root.docSchema")).entries;
+    return parseIndex(await this.getIndexText(root.hash, "root.docSchema"))
+      .entries;
   }
 
   async getDocEntries(entry: {
     id: string;
     hash: string;
   }): Promise<IndexEntry[]> {
-    return parseIndex(await this.getText(entry.hash, `${entry.id}.docSchema`))
-      .entries;
+    return parseIndex(
+      await this.getIndexText(entry.hash, `${entry.id}.docSchema`),
+    ).entries;
   }
 
   /**
