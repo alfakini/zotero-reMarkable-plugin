@@ -101,7 +101,14 @@ export class SyncEngine {
     attachments: Zotero.Item[],
     progress: Progress = () => {},
   ): Promise<SyncReport> {
-    return this.lock.run(() => this.doSync(attachments, progress));
+    return this.lock.run(async () => {
+      try {
+        return await this.doSync(attachments, progress);
+      } finally {
+        // Page blobs only help within one sync; don't keep them resident.
+        this.cloud.clearPageCache();
+      }
+    });
   }
 
   /** Attachments that are tracked in the sync state. */
@@ -200,6 +207,8 @@ export class SyncEngine {
         if (e instanceof RemarkableError && e.status === 401) break;
       } finally {
         await this.state.save();
+        // Page blobs only help within one attachment; release them now.
+        this.cloud.clearPageCache();
       }
     }
     progress("Done", 1);
