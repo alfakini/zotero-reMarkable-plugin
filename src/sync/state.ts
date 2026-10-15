@@ -6,6 +6,8 @@
  * never touches annotations the user made in Zotero.
  */
 
+import { buildDetachedList } from "./detached";
+
 export interface ImportedRecord {
   /** Zotero annotation or note key. */
   zoteroKey: string;
@@ -56,6 +58,12 @@ export interface DocState {
   notesFingerprint?: string;
   /** reMarkable item id (page:item) -> imported Zotero object. */
   imported: Record<string, ImportedRecord>;
+  /**
+   * Zotero keys imported from an earlier tablet document that was replaced
+   * (the PDF's page count changed). They are not erased, since their
+   * reMarkable keys are gone, but they stay out of the uploaded PDF.
+   */
+  detachedImported?: string[];
   lastSync?: string;
   /** Message and stack of the last failed sync, for troubleshooting. */
   lastError?: string;
@@ -281,8 +289,57 @@ export class SyncStateStore {
     this.data.docs[stateKey(doc.libraryID, doc.attachmentKey)] = doc;
   }
 
-  delete(libraryID: number, attachmentKey: string) {
+  private delete(libraryID: number, attachmentKey: string) {
     delete this.data.docs[stateKey(libraryID, attachmentKey)];
+  }
+
+  /**
+   * Forget a document: its imported and already detached Zotero keys move to
+   * the detached registry, then the DocState is deleted. Use this wherever a
+   * tracked document is dropped.
+   */
+  forget(libraryID: number, attachmentKey: string) {
+    const doc = this.get(libraryID, attachmentKey);
+    if (doc) this.addDetached(libraryID, attachmentKey, buildDetachedList(doc));
+    this.delete(libraryID, attachmentKey);
+  }
+
+  /** Zotero keys detached from this attachment's forgotten documents. */
+  getDetached(libraryID: number, attachmentKey: string): string[] {
+    const keys = this.data.detached?.[stateKey(libraryID, attachmentKey)];
+    return Array.isArray(keys) ? keys.filter((k) => typeof k === "string") : [];
+  }
+
+  addDetached(
+    libraryID: number,
+    attachmentKey: string,
+    keys: Iterable<string>,
+  ) {
+    const all = new Set(this.getDetached(libraryID, attachmentKey));
+    for (const k of keys) all.add(k);
+    if (!all.size) return;
+    this.data.detached ??= {};
+    this.data.detached[stateKey(libraryID, attachmentKey)] = [...all];
+  }
+
+  /** Drop keys from the registry, e.g. because the objects were erased. */
+  removeDetached(
+    libraryID: number,
+    attachmentKey: string,
+    keys: Iterable<string>,
+  ) {
+    const id = stateKey(libraryID, attachmentKey);
+    const drop = new Set(keys);
+    const rest = this.getDetached(libraryID, attachmentKey).filter(
+      (k) => !drop.has(k),
+    );
+    if (rest.length) {
+      this.data.detached ??= {};
+      this.data.detached[id] = rest;
+    } else if (this.data.detached) {
+      delete this.data.detached[id];
+      if (!Object.keys(this.data.detached).length) delete this.data.detached;
+    }
   }
 
   all(): DocState[] {
