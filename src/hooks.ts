@@ -12,7 +12,13 @@ async function onStartup() {
   ]);
   initLocale();
   addon.data.service = new RemarkableService();
-  await addon.data.service.state.load();
+  try {
+    await addon.data.service.state.load();
+  } catch (e) {
+    // An unreadable state file must not break startup. The store stays
+    // unloaded, so the first sync attempt retries load() and reports it.
+    Zotero.logError(e as Error);
+  }
   registerPrefsPane();
   registerMenus();
   addon.data.service.scheduleAutoSync();
