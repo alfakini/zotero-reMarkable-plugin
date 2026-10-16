@@ -28,10 +28,15 @@ import {
 import type { PageBox, ZPosition } from "./types";
 
 /**
- * Bump when the conversion output changes, so already-synced documents are
- * re-imported (imported objects are updated in place, keyed by rmKey).
+ * Bump when the conversion output changes. Every already-synced document is
+ * then pulled and each of its imported objects re-imported once, updated in
+ * place and keyed by rmKey (comments and tags edited in Zotero are kept),
+ * even when the tablet content itself did not change.
+ *
+ * 4: respace output (ligatures, astral characters, page splitting), ink
+ *    fitting, the import tag, annotation/comment merging and note output.
  */
-export const CONVERTER_VERSION = 3;
+export const CONVERTER_VERSION = 4;
 
 /** reMarkable units per PDF point (rM2 / Paper Pro render PDFs at 226 dpi). */
 export const RM_DPI = 226;

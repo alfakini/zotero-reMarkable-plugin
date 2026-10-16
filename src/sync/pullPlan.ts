@@ -122,6 +122,32 @@ export function needsPull(
 }
 
 /**
+ * Whether an imported record is up to date with its candidate and can be
+ * skipped by pull(). The candidate hash covers only the raw conversion, not
+ * the later steps (respace, ink fitting, tagging, merging, note HTML), so a
+ * record imported by an older converter is never current: it is re-imported
+ * once after a CONVERTER_VERSION bump.
+ */
+export function isRecordCurrent(
+  rec: { hash: string },
+  candidateHash: string,
+  docConverterVersion: number | undefined,
+  converterVersion: number,
+): boolean {
+  return rec.hash === candidateHash && docConverterVersion === converterVersion;
+}
+
+/**
+ * The record to keep when re-importing it failed. pull() still advances the
+ * document to the current converter version, so the old hash could match the
+ * candidate again and the failed update would never be retried. An empty hash
+ * matches no candidate, keeping the retry (the object itself stays as it was).
+ */
+export function invalidatedRecord<T extends { hash: string }>(rec: T): T {
+  return { ...rec, hash: "" };
+}
+
+/**
  * The `rmDocHash` to record after we changed the tablet document. `known` is
  * the hash we last pulled or recorded; `changed.baseHash` is the document
  * entry our change was merged onto and `changed.hash` the result. Only when
