@@ -6,7 +6,7 @@
  * never touches annotations the user made in Zotero.
  */
 
-import { buildDetachedList } from "./detached";
+import type { PageBox } from "./types";
 
 export interface ImportedRecord {
   /** Zotero annotation or note key. */
@@ -53,7 +53,7 @@ export interface DocState {
   originalPageCount: number;
   appendedPageCount: number;
   /** Original PDF page boxes (CropBox) used for coordinate mapping. */
-  pageBoxes: { x: number; y: number; width: number; height: number }[];
+  pageBoxes: PageBox[];
   /** Notebook page id -> paired "reMarkable Note" child note. */
   notePages?: Record<string, NotePageRecord>;
   /** Fingerprint of synced notes at the last note sync. */
@@ -90,6 +90,22 @@ function stateKey(libraryID: number, attachmentKey: string) {
   return `${libraryID}/${attachmentKey}`;
 }
 
+/**
+ * Zotero keys that are not the user's own: imported from `doc`, detached
+ * from an earlier tablet document that was replaced, plus `registry` (the
+ * persistent registry of forgotten documents, which is how a forgotten
+ * pending upload hands its keys to the re-upload). They are never burned
+ * into the uploaded PDF, and they are what "remove imported" erases.
+ */
+export function buildDetachedList(
+  doc: Pick<DocState, "imported" | "detachedImported"> | undefined,
+  registry: Iterable<string> = [],
+): string[] {
+  const keys = new Set<string>([...(doc?.detachedImported ?? []), ...registry]);
+  for (const rec of Object.values(doc?.imported ?? {})) keys.add(rec.zoteroKey);
+  return [...keys];
+}
+
 /** The few file operations the store needs; injectable for Node tests. */
 export interface StateFileIO {
   exists(path: string): Promise<boolean>;
@@ -103,7 +119,7 @@ export interface StateFileIO {
 }
 
 /** Default IO backed by Gecko's IOUtils/PathUtils. */
-export function zoteroStateIO(): StateFileIO {
+function zoteroStateIO(): StateFileIO {
   return {
     exists: (path) => IOUtils.exists(path),
     readText: (path) => IOUtils.readUTF8(path),
@@ -291,10 +307,6 @@ export class SyncStateStore {
     this.data.docs[stateKey(doc.libraryID, doc.attachmentKey)] = doc;
   }
 
-  private delete(libraryID: number, attachmentKey: string) {
-    delete this.data.docs[stateKey(libraryID, attachmentKey)];
-  }
-
   /**
    * Forget a document: its imported and already detached Zotero keys move to
    * the detached registry, then the DocState is deleted. Use this wherever a
@@ -303,13 +315,12 @@ export class SyncStateStore {
   forget(libraryID: number, attachmentKey: string) {
     const doc = this.get(libraryID, attachmentKey);
     if (doc) this.addDetached(libraryID, attachmentKey, buildDetachedList(doc));
-    this.delete(libraryID, attachmentKey);
+    delete this.data.docs[stateKey(libraryID, attachmentKey)];
   }
 
   /** Zotero keys detached from this attachment's forgotten documents. */
   getDetached(libraryID: number, attachmentKey: string): string[] {
-    const keys = this.data.detached?.[stateKey(libraryID, attachmentKey)];
-    return Array.isArray(keys) ? keys.filter((k) => typeof k === "string") : [];
+    return this.data.detached?.[stateKey(libraryID, attachmentKey)] ?? [];
   }
 
   addDetached(
@@ -345,8 +356,7 @@ export class SyncStateStore {
   }
 
   getFolderId(name: string): string | undefined {
-    const id = this.data.folders?.[name];
-    return typeof id === "string" && id ? id : undefined;
+    return this.data.folders?.[name] || undefined;
   }
 
   setFolderId(name: string, id: string) {
@@ -356,13 +366,5 @@ export class SyncStateStore {
 
   all(): DocState[] {
     return Object.values(this.data.docs);
-  }
-
-  /** True if the given Zotero key was created by this plugin. */
-  isImported(doc: DocState | undefined, zoteroKey: string) {
-    return (
-      !!doc &&
-      Object.values(doc.imported).some((r) => r.zoteroKey === zoteroKey)
-    );
   }
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { CONVERTER_VERSION } from "../../src/sync/convert";
 import {
   FakeTablet,
   STATE_PATH,
@@ -157,4 +158,32 @@ test("a changed page count uploads a new document under a persisted id and trash
   assert.equal(persisted?.rmDocId, newId);
   assert.equal(persisted?.uploadedFingerprint, undefined);
   assert.equal(diskState(io).docs[KEY].rmDocId, newId);
+});
+
+test("a newly uploaded document starts at the current converter version, so the next sync does not download it", async () => {
+  const { io, tablet, att, boot } = await setup();
+  await (await boot()).engine.sync([att]);
+  const doc = diskState(io).docs[KEY];
+  // Nothing is imported yet; without the version the next sync would see a
+  // mismatch and pull every page for nothing.
+  assert.equal(doc.converterVersion, CONVERTER_VERSION);
+  assert.deepEqual(doc.imported, {});
+  assert.equal(tablet.pulls.length, 0);
+
+  const again = await (await boot()).engine.sync([att]);
+  assert.deepEqual(again.errors, []);
+  assert.equal(again.uploaded + again.updated, 0);
+  assert.deepEqual(tablet.pulls, [], "the tablet copy was not downloaded");
+});
+
+test("a replacement upload after a page count change also starts at the current converter version", async () => {
+  const { z, io, tablet, att, boot } = await setup(2);
+  await (await boot()).engine.sync([att]);
+  z.files.set(PATH, await makePdf(3));
+  await (await boot()).engine.sync([att]);
+  const doc = diskState(io).docs[KEY];
+  assert.equal(doc.converterVersion, CONVERTER_VERSION);
+  assert.deepEqual(doc.imported, {});
+  await (await boot()).engine.sync([att]);
+  assert.deepEqual(tablet.pulls, []);
 });

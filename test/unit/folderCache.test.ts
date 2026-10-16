@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isTopLevelFolder } from "../../src/remarkable/cloud";
-import { cachedFolderId, resolveFolderId } from "../../src/sync/folderCache";
+import {
+  type FolderMetadata,
+  type IndexEntry,
+  isTopLevelFolder,
+} from "../../src/remarkable/cloud";
+import { resolveFolderId } from "../../src/sync/engine";
 import { SyncStateStore, type StateFileIO } from "../../src/sync/state";
 
 const cacheOf = (folders: Record<string, string>) => ({
@@ -11,12 +15,30 @@ const cacheOf = (folders: Record<string, string>) => ({
   },
 });
 
-test("cachedFolderId trusts the cache only while the folder is in the root", () => {
-  const cache = cacheOf({ Zotero: "f1" });
-  assert.equal(cachedFolderId(cache, "Zotero", new Set(["f1", "d"])), "f1");
-  assert.equal(cachedFolderId(cache, "Zotero", new Set(["d"])), undefined);
-  assert.equal(cachedFolderId(cache, "Other", new Set(["f1"])), undefined);
+/** Root index entries for these document ids. */
+const rootOf = (...ids: string[]) =>
+  new Map(
+    ids.map(
+      (id) =>
+        [id, { id, hash: `h-${id}`, type: "0", subfiles: 0, size: 0 }] as const,
+    ),
+  );
+
+/** A cloud whose ensureFolder / readMetadata are the given functions. */
+const cloudOf = (
+  ensureFolder: (name: string) => Promise<string>,
+  readMetadata: (
+    entry: IndexEntry,
+  ) => Promise<FolderMetadata | undefined> = async () => undefined,
+) => ({
+  ensureFolder,
+  readMetadata: readMetadata as (
+    entry: IndexEntry,
+  ) => Promise<Record<string, unknown> | undefined>,
 });
+const never = (what: string) => () => {
+  throw new Error(what);
+};
 
 const folder = (over: Record<string, unknown> = {}) => ({
   type: "CollectionType",
@@ -42,26 +64,20 @@ test("isTopLevelFolder accepts only a live top-level folder with the configured 
 test("resolveFolderId uses a valid cached id without calling ensure", async () => {
   const cache = cacheOf({ Zotero: "f1" });
   const id = await resolveFolderId(
+    cloudOf(never("ensure must not run"), async () => folder()),
     cache,
     "Zotero",
-    new Set(["f1"]),
-    () => {
-      throw new Error("ensure must not run");
-    },
-    async () => folder(),
+    rootOf("f1"),
   );
   assert.equal(id, "f1");
 });
 
 test("resolveFolderId does not read metadata when the id is not in the root", async () => {
   const id = await resolveFolderId(
+    cloudOf(async () => "f2", never("must not read")),
     cacheOf({ Zotero: "gone" }),
     "Zotero",
-    new Set(),
-    async () => "f2",
-    () => {
-      throw new Error("must not read");
-    },
+    rootOf(),
   );
   assert.equal(id, "f2");
 });
@@ -73,25 +89,18 @@ test("resolveFolderId falls back to ensure and updates the cache", async () => {
     calls.push(n);
     return "f2";
   };
-  const read = async () => folder();
+  const cloud = cloudOf(ensure, async () => folder());
   const id = await resolveFolderId(
+    cloud,
     cacheOf(folders),
     "Zotero",
-    new Set(["f2"]),
-    ensure,
-    read,
+    rootOf("f2"),
   );
   assert.equal(id, "f2");
   assert.deepEqual(calls, ["Zotero"]);
   assert.equal(folders.Zotero, "f2");
   // Second sync: the cache now hits.
-  await resolveFolderId(
-    cacheOf(folders),
-    "Zotero",
-    new Set(["f2"]),
-    ensure,
-    read,
-  );
+  await resolveFolderId(cloud, cacheOf(folders), "Zotero", rootOf("f2"));
   assert.equal(calls.length, 1);
 });
 
@@ -104,11 +113,13 @@ test("resolveFolderId replaces a cached folder whose metadata no longer matches"
   ]) {
     const folders: Record<string, string> = { Zotero: "old" };
     const id = await resolveFolderId(
+      cloudOf(
+        async () => "new",
+        async () => meta,
+      ),
       cacheOf(folders),
       "Zotero",
-      new Set(["old"]),
-      async () => "new",
-      async () => meta,
+      rootOf("old"),
     );
     assert.equal(id, "new");
     assert.equal(folders.Zotero, "new");
@@ -118,15 +129,10 @@ test("resolveFolderId replaces a cached folder whose metadata no longer matches"
 test("resolveFolderId needs no folder or cache for an empty name", async () => {
   const folders: Record<string, string> = {};
   const id = await resolveFolderId(
+    cloudOf(never("ensure must not run"), never("must not read")),
     cacheOf(folders),
     "",
-    new Set(),
-    () => {
-      throw new Error("ensure must not run");
-    },
-    () => {
-      throw new Error("must not read");
-    },
+    rootOf(),
   );
   assert.equal(id, "");
   assert.deepEqual(folders, {});

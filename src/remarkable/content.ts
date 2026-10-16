@@ -62,13 +62,12 @@ function idxWidth(n: number) {
   return Math.max(2, Math.ceil(Math.log(n + 1) / Math.log(24)));
 }
 
-export interface ContentOptions {
+interface ContentOptions {
   pageCount: number;
   sizeInBytes: number;
   newId: () => string;
   /** Client uuid recorded as the CRDT author. */
   authorId: string;
-  landscape?: boolean;
 }
 
 /** A formatVersion 2 `.content` like the tablet writes, one page per PDF page. */
@@ -95,7 +94,7 @@ export function buildPdfContent(o: ContentOptions) {
     formatVersion: 2,
     lineHeight: -1,
     margins: 125,
-    orientation: o.landscape ? "landscape" : "portrait",
+    orientation: "portrait",
     originalPageCount: o.pageCount,
     pageCount: o.pageCount,
     pageTags: [],
@@ -122,15 +121,9 @@ export function reconcileContent(
   if (!content?.cPages?.pages) {
     return buildPdfContent({ pageCount, sizeInBytes, newId, authorId });
   }
-  const c = JSON.parse(JSON.stringify(content)); // no structuredClone in sandboxes
+  const c = clone(content);
   const cp = c.cPages;
-  cp.uuids ??= [];
-  let author = cp.uuids.find((u: any) => u.first === authorId)?.second;
-  if (!author) {
-    author = Math.max(0, ...cp.uuids.map((u: any) => u.second ?? 0)) + 1;
-    cp.uuids.push({ first: authorId, second: author });
-  }
-  const ts = `${author}:${Date.now() % 1_000_000}`;
+  const ts = contentAuthor(c, authorId);
   const seen = new Set<number>();
   for (const p of cp.pages) {
     const r = p.redir?.value;
@@ -139,28 +132,46 @@ export function reconcileContent(
       p.deleted = { timestamp: ts, value: 1 };
     else if (r < pageCount && p.deleted?.value !== 1) seen.add(r);
   }
-  const maxIdx = cp.pages.reduce(
-    (m: string, p: any) => (p.idx?.value > m ? p.idx.value : m),
-    "",
-  );
   const missing = Array.from({ length: pageCount }, (_, i) => i).filter(
     (i) => !seen.has(i),
   );
   const width = idxWidth(missing.length);
+  // Computed once: every new page shares this prefix and differs only in the
+  // fixed-width suffix. Re-reading it per page would nest the idx values.
+  const top = maxIdx(cp) || "b";
   missing.forEach((r, k) => {
     cp.pages.push({
       id: newId(),
-      idx: { timestamp: ts, value: `${maxIdx || "b"}${idxKey(k + 1, width)}` },
+      idx: { timestamp: ts, value: `${top}${idxKey(k + 1, width)}` },
       redir: { timestamp: ts, value: r },
     });
   });
   cp.original = { timestamp: ts, value: pageCount };
   c.originalPageCount = pageCount;
-  c.pageCount = cp.pages.filter((p: any) => p.deleted?.value !== 1).length;
+  c.pageCount = liveCount(cp);
   c.sizeInBytes = String(sizeInBytes);
   return c;
 }
 
+/** Deep copy; there is no structuredClone in plugin sandboxes. */
+function clone(content: any) {
+  return JSON.parse(JSON.stringify(content));
+}
+
+/** Pages not marked deleted. */
+function liveCount(cPages: any): number {
+  return cPages.pages.filter((p: any) => p.deleted?.value !== 1).length;
+}
+
+/** Highest fractional `idx` in use, so a new page can sort after it. */
+function maxIdx(cPages: any): string {
+  return cPages.pages.reduce(
+    (m: string, p: any) => (p.idx?.value > m ? p.idx.value : m),
+    "",
+  );
+}
+
+/** Timestamp `<author>:<counter>` for a change by `authorId`, registering the author if needed. */
 function contentAuthor(c: any, authorId: string) {
   const cp = c.cPages;
   cp.uuids ??= [];
@@ -181,32 +192,26 @@ export function addInsertedPage(
   pageId: string,
   authorId: string,
 ) {
-  const c = JSON.parse(JSON.stringify(content));
+  const c = clone(content);
   if (!c.cPages?.pages) throw new Error("document has no page map yet");
-  const ts = contentAuthor(c, authorId);
-  const maxIdx = c.cPages.pages.reduce(
-    (m: string, p: any) => (p.idx?.value > m ? p.idx.value : m),
-    "",
-  );
   c.cPages.pages.push({
     id: pageId,
     // Same shape as pages inserted on the tablet (no template => blank).
-    idx: { timestamp: ts, value: `${maxIdx || "b"}n` },
+    idx: {
+      timestamp: contentAuthor(c, authorId),
+      value: `${maxIdx(c.cPages) || "b"}n`,
+    },
   });
-  c.pageCount = c.cPages.pages.filter(
-    (p: any) => p.deleted?.value !== 1,
-  ).length;
+  c.pageCount = liveCount(c.cPages);
   return c;
 }
 
 /** Mark a page deleted (the tablet removes it on its next sync). */
 export function deletePage(content: any, pageId: string, authorId: string) {
-  const c = JSON.parse(JSON.stringify(content));
+  const c = clone(content);
   const page = c.cPages?.pages?.find((p: any) => p.id === pageId);
   if (!page) return c;
   page.deleted = { timestamp: contentAuthor(c, authorId), value: 1 };
-  c.pageCount = c.cPages.pages.filter(
-    (p: any) => p.deleted?.value !== 1,
-  ).length;
+  c.pageCount = liveCount(c.cPages);
   return c;
 }

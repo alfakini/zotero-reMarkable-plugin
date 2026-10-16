@@ -110,6 +110,15 @@ function isUnreadable(e: unknown) {
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+/** Throws, with the status, when a sync-API response is not ok. */
+async function checkOk(res: Response, label: string) {
+  if (res.ok) return;
+  throw new RemarkableError(
+    `${label}: ${res.status} ${await res.text()}`,
+    res.status,
+  );
+}
+
 /** The metadata fields that decide whether a folder is the configured one. */
 export interface FolderMetadata {
   type?: unknown;
@@ -132,7 +141,7 @@ export function isTopLevelFolder(
   );
 }
 
-export function byId(a: { id: string }, b: { id: string }) {
+function byId(a: { id: string }, b: { id: string }) {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
@@ -201,20 +210,6 @@ export async function registerDevice(
   return text.trim();
 }
 
-/**
- * Pair and only keep the device token once it has been validated, so a token
- * that does not work is never stored (and the UI never shows as connected).
- */
-export async function pairDevice(steps: {
-  register: () => Promise<string>;
-  validate: (token: string) => Promise<unknown>;
-  store: (token: string) => void;
-}): Promise<void> {
-  const token = await steps.register();
-  await steps.validate(token);
-  steps.store(token);
-}
-
 /** Max cached index blobs (root and document indexes). */
 const INDEX_CACHE_MAX = 256;
 
@@ -222,7 +217,7 @@ const INDEX_CACHE_MAX = 256;
 export const META_CACHE_MAX = 1024;
 
 /** Default byte cap of the .rm page blob cache. */
-export const DEFAULT_PAGE_CACHE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_PAGE_CACHE_BYTES = 64 * 1024 * 1024;
 
 export class RemarkableCloud {
   private fetch: FetchFn;
@@ -350,8 +345,7 @@ export class RemarkableCloud {
     const res = await this.request("/sync/v4/root");
     if (res.status === 404)
       return { hash: "", generation: 0, schemaVersion: 4 };
-    if (!res.ok)
-      throw new RemarkableError(`GET root: ${res.status}`, res.status);
+    await checkOk(res, "GET root");
     return (await res.json()) as unknown as RootInfo;
   }
 
@@ -359,21 +353,19 @@ export class RemarkableCloud {
     const res = await this.request(`/sync/v3/files/${hash}`, {
       headers: { "rm-filename": filename },
     });
-    if (!res.ok) {
-      throw new RemarkableError(
-        `GET ${filename}: ${res.status} ${await res.text()}`,
-        res.status,
-      );
-    }
+    await checkOk(res, `GET ${filename}`);
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  async getText(hash: string, filename: string) {
+  private async getText(hash: string, filename: string) {
     return dec.decode(await this.getBlob(hash, filename));
   }
 
   /** Upload a blob and return its hash. */
-  async putBlob(filename: string, data: Uint8Array | string): Promise<string> {
+  private async putBlob(
+    filename: string,
+    data: Uint8Array | string,
+  ): Promise<string> {
     const bytes = typeof data === "string" ? enc.encode(data) : data;
     return this.putHashed(filename, bytes, await sha256Hex(bytes));
   }
@@ -394,12 +386,7 @@ export class RemarkableCloud {
       },
       body: bytes as BodyInit,
     });
-    if (!res.ok) {
-      throw new RemarkableError(
-        `PUT ${filename}: ${res.status} ${await res.text()}`,
-        res.status,
-      );
-    }
+    await checkOk(res, `PUT ${filename}`);
     return hash;
   }
 
@@ -418,28 +405,16 @@ export class RemarkableCloud {
     if (cached) return cached;
     const pending = this.pageInflight.get(hash);
     if (pending) return pending;
-    const download = this.downloadPage(hash, filename);
+    const download = this.getBlob(hash, filename).then((data) => {
+      this.pageCache.set(hash, data);
+      return data;
+    });
     this.pageInflight.set(hash, download);
     try {
       return await download;
     } finally {
       this.pageInflight.delete(hash);
     }
-  }
-
-  private async downloadPage(hash: string, filename: string) {
-    const data = await this.getBlob(hash, filename);
-    this.pageCache.set(hash, data);
-    return data;
-  }
-
-  /** Text of an index (.docSchema) blob, cached by its immutable hash. */
-  private async getIndexText(hash: string, filename: string): Promise<string> {
-    const cached = this.indexCache.get(hash);
-    if (cached !== undefined) return cached;
-    const text = await this.getText(hash, filename);
-    this.indexCache.set(hash, text);
-    return text;
   }
 
   async getRootEntries(root: RootInfo): Promise<IndexEntry[]> {
@@ -452,13 +427,17 @@ export class RemarkableCloud {
     return parseIndex(text).entries;
   }
 
+  /** A document's file entries; the index text is cached by its immutable hash. */
   async getDocEntries(entry: {
     id: string;
     hash: string;
   }): Promise<IndexEntry[]> {
-    return parseIndex(
-      await this.getIndexText(entry.hash, `${entry.id}.docSchema`),
-    ).entries;
+    let text = this.indexCache.get(entry.hash);
+    if (text === undefined) {
+      text = await this.getText(entry.hash, `${entry.id}.docSchema`);
+      this.indexCache.set(entry.hash, text);
+    }
+    return parseIndex(text).entries;
   }
 
   /**
@@ -466,7 +445,7 @@ export class RemarkableCloud {
    * mutator receives the current root entries and returns the new list; it is
    * re-run on generation conflicts.
    */
-  async updateRoot(
+  private async updateRoot(
     mutate: (entries: IndexEntry[]) => Promise<IndexEntry[]> | IndexEntry[],
   ) {
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -557,20 +536,23 @@ export class RemarkableCloud {
     };
   }
 
-  /** Upload files for a brand-new document and return its root-index entry. */
-  private async putDocument(
+  /** Upload and commit a brand-new document (fresh id, nothing to merge with). */
+  private async createDocument(
     id: string,
     files: FileUpdate[],
   ): Promise<IndexEntry> {
-    return this.putDocIndex(id, await this.uploadFiles(files));
+    const entry = await this.putDocIndex(id, await this.uploadFiles(files));
+    await this.updateRoot((entries) => [
+      ...entries.filter((e) => e.id !== id),
+      entry,
+    ]);
+    return entry;
   }
 
-  /** Commit a brand-new document (fresh id, nothing to merge with). */
-  private async commitDocument(docEntry: IndexEntry) {
-    await this.updateRoot((entries) => [
-      ...entries.filter((e) => e.id !== docEntry.id),
-      docEntry,
-    ]);
+  /** The parsed `.content` of a document, or `{}` when it has none. */
+  private async readContent(id: string, files: IndexEntry[]): Promise<any> {
+    const entry = files.find((f) => f.id === `${id}.content`);
+    return entry ? JSON.parse(await this.getText(entry.hash, entry.id)) : {};
   }
 
   /**
@@ -654,17 +636,11 @@ export class RemarkableCloud {
    * an unreadable entry throws instead, for callers that must not act on an
    * incomplete listing (folder discovery would otherwise create a duplicate).
    */
-  async listItems({
-    concurrency = 3,
-    strict = false,
-  }: {
-    concurrency?: number;
-    strict?: boolean;
-  } = {}): Promise<RmItem[]> {
+  async listItems({ strict = false } = {}): Promise<RmItem[]> {
     const root = await this.getRoot();
     const entries = await this.getRootEntries(root);
     const out: RmItem[] = [];
-    await pool(entries, concurrency, async (entry) => {
+    await pool(entries, 3, async (entry) => {
       let item: RmItem;
       try {
         item = await this.loadItem(entry);
@@ -723,16 +699,15 @@ export class RemarkableCloud {
   /**
    * Find (or create) a top-level folder with the given name. The listing is
    * strict: an unreadable entry could be the existing folder, so it throws
-   * rather than creating a duplicate. A caller-supplied `items` must come
-   * from a strict listing for the same reason.
+   * rather than creating a duplicate.
    */
-  async ensureFolder(name: string, items?: RmItem[]): Promise<string> {
-    items ??= await this.listItems({ strict: true });
+  async ensureFolder(name: string): Promise<string> {
+    const items = await this.listItems({ strict: true });
     const found = items.find((i) => isTopLevelFolder(i.metadata, name));
     if (found) return found.id;
     const id = uuid4();
     const now = String(Date.now());
-    const entry = await this.putDocument(id, [
+    await this.createDocument(id, [
       {
         name: `${id}.metadata`,
         data: JSON.stringify({
@@ -746,7 +721,6 @@ export class RemarkableCloud {
       },
       { name: `${id}.content`, data: JSON.stringify({ tags: [] }) },
     ]);
-    await this.commitDocument(entry);
     return id;
   }
 
@@ -780,13 +754,12 @@ export class RemarkableCloud {
       newId: uuid4,
       authorId: this.opts.clientId ?? uuid4(),
     });
-    const entry = await this.putDocument(id, [
+    const entry = await this.createDocument(id, [
       { name: `${id}.pdf`, data: pdf },
       { name: `${id}.metadata`, data: JSON.stringify(metadata) },
       { name: `${id}.content`, data: JSON.stringify(content) },
       { name: `${id}.pagedata`, data: "\n" },
     ]);
-    await this.commitDocument(entry);
     return { id, hash: entry.hash };
   }
 
@@ -826,12 +799,8 @@ export class RemarkableCloud {
         return true;
       });
       if (meta) updates.push(meta);
-      const contentEntry = cur.files.find((f) => f.id === `${id}.content`);
-      const oldContent = contentEntry
-        ? JSON.parse(await cur.readText(contentEntry))
-        : undefined;
       const content = reconcileContent(
-        oldContent,
+        await this.readContent(id, cur.files),
         pageCount,
         pdf.length,
         uuid4,
@@ -877,15 +846,14 @@ export class RemarkableCloud {
     changes: { pages?: Map<string, Uint8Array>; content?: unknown },
     opts: { expectedHash?: string } = {},
   ): Promise<ChangedDocument> {
-    const docEntry = await this.findDocument(id);
-    if (!docEntry) throw new RemarkableError(`Document ${id} not found`, 404);
+    const doc = await this.openDocument(id);
+    if (!doc) throw new RemarkableError(`Document ${id} not found`, 404);
     if (
       opts.expectedHash !== undefined &&
-      docEntry.hash !== opts.expectedHash
+      doc.entry.hash !== opts.expectedHash
     ) {
       throw new RemarkableError(TABLET_CHANGED);
     }
-    const files = await this.getDocEntries(docEntry);
     const updates: FileUpdate[] = [];
     for (const [pageId, data] of changes.pages ?? []) {
       updates.push({ name: `${id}/${pageId}.rm`, data });
@@ -897,9 +865,9 @@ export class RemarkableCloud {
       });
     }
     if (!updates.length) {
-      return { hash: docEntry.hash, baseHash: docEntry.hash };
+      return { hash: doc.entry.hash, baseHash: doc.entry.hash };
     }
-    return this.changeDocument(id, docEntry, files, () => updates, {
+    return this.changeDocument(id, doc.entry, doc.files, () => updates, {
       onChanged: "throw",
     });
   }
@@ -931,11 +899,9 @@ export class RemarkableCloud {
   async getPageIds(id: string): Promise<Set<string> | undefined> {
     const doc = await this.openDocument(id);
     if (!doc) return undefined;
-    const entry = doc.files.find((f) => f.id === `${id}.content`);
-    const content = entry
-      ? JSON.parse(await this.getText(entry.hash, entry.id))
-      : {};
-    return new Set(pageRefs(content).map((r) => r.id));
+    return new Set(
+      pageRefs(await this.readContent(id, doc.files)).map((r) => r.id),
+    );
   }
 
   /**
@@ -946,10 +912,7 @@ export class RemarkableCloud {
     entry ??= await this.findDocument(id);
     if (!entry) return undefined;
     const files = await this.getDocEntries(entry);
-    const contentEntry = files.find((f) => f.id === `${id}.content`);
-    const content = contentEntry
-      ? JSON.parse(await this.getText(contentEntry.hash, contentEntry.id))
-      : {};
+    const content = await this.readContent(id, files);
     const rm = new Map<string, Uint8Array>();
     const rmEntries = files.filter((f) => /\/[^/]+\.rm$/.test(f.id));
     await pool(rmEntries, 3, async (f) => {

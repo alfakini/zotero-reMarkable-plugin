@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mergeAnnotationFields } from "../../src/sync/annotationMerge";
+import { mergeAnnotationFields } from "../../src/sync/zotero";
 
 const TAG = "reMarkable";
 

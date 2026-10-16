@@ -57,6 +57,9 @@ export interface FakeZoteroItem {
   key: string;
   deleted: boolean;
   eraseTx(): Promise<void>;
+  isAnnotation(): boolean;
+  annotationComment: string;
+  getTags(): { tag: string }[];
 }
 
 /**
@@ -67,11 +70,47 @@ export function installGlobals() {
   const items = new Map<string, FakeZoteroItem>();
   const files = new Map<string, Uint8Array>();
   const erased: string[] = [];
+  /** Annotations passed to Zotero.Annotations.saveFromJSON, in order. */
+  const saved: { key?: string; [field: string]: unknown }[] = [];
+  const behavior = { failSave: false };
+  let nextKey = 0;
   const g = globalThis as Record<string, unknown>;
+  const addItem = (libraryID: number, key: string) => {
+    items.set(`${libraryID}/${key}`, {
+      key,
+      deleted: false,
+      isAnnotation: () => true,
+      annotationComment: "",
+      getTags: () => [],
+      eraseTx: async () => {
+        erased.push(key);
+        items.delete(`${libraryID}/${key}`);
+      },
+    });
+  };
   g.Zotero = {
     Items: {
       getByLibraryAndKey: (lib: number, key: string) =>
         items.get(`${lib}/${key}`) ?? false,
+    },
+    DataObjectUtilities: { generateKey: () => `GEN${++nextKey}` },
+    Annotations: {
+      saveFromJSON: async (
+        att: { libraryID: number },
+        json: { key: string },
+      ) => {
+        if (behavior.failSave) throw new Error("save failed");
+        saved.push(json);
+        addItem(att.libraryID, json.key);
+        return { key: json.key };
+      },
+    },
+    PDFWorker: {
+      // No text layer: highlights keep the text the tablet gave them.
+      getFullText: async () => {
+        throw new Error("no full text");
+      },
+      renderAttachmentAnnotations: async () => {},
     },
     logError() {},
     debug() {},
@@ -91,17 +130,11 @@ export function installGlobals() {
   return {
     erased,
     files,
+    saved,
+    /** Set `failSave` to make saving an imported annotation throw. */
+    behavior,
     /** A Zotero object that exists in the library. */
-    addItem(libraryID: number, key: string) {
-      items.set(`${libraryID}/${key}`, {
-        key,
-        deleted: false,
-        eraseTx: async () => {
-          erased.push(key);
-          items.delete(`${libraryID}/${key}`);
-        },
-      });
-    },
+    addItem,
     has: (libraryID: number, key: string) => items.has(`${libraryID}/${key}`),
     /** The user deleted the object by hand (not recorded in `erased`). */
     remove: (libraryID: number, key: string) =>
@@ -140,6 +173,8 @@ interface TabletDoc {
   name: string;
   pdf: Uint8Array;
   pageCount: number;
+  /** What the tablet holds besides the PDF: the .content JSON and .rm blobs. */
+  files?: { content: unknown; rm: Map<string, Uint8Array> };
 }
 
 /**
@@ -150,12 +185,26 @@ export class FakeTablet {
   docs = new Map<string, TabletDoc>();
   /** Calls in order, e.g. "upload:<id>", "replace:<id>", "rename:<id>". */
   calls: string[] = [];
+  /** Ids of the documents whose files were downloaded (one per pull). */
+  pulls: string[] = [];
   private n = 0;
   /** Runs after uploadPdf committed the document, before it returns. */
   afterUploadCommit?: (id: string) => void | Promise<void>;
 
   private nextHash() {
     return `hash-${++this.n}`;
+  }
+
+  /**
+   * The tablet changes the document's pages (a new hash, as after the user
+   * wrote on it). A page listed in `content` without an entry in `rm` has no
+   * .rm blob.
+   */
+  setFiles(id: string, content: unknown, rm: Map<string, Uint8Array>) {
+    const d = this.docs.get(id);
+    if (!d) throw new Error(`Document ${id} not found`);
+    d.files = { content, rm };
+    d.hash = this.nextHash();
   }
 
   count(prefix: string) {
@@ -227,10 +276,13 @@ export class FakeTablet {
       async getDocumentFiles(id: string) {
         const d = self.docs.get(id);
         if (!d) return undefined;
-        return {
-          content: { pageCount: d.pageCount, pages: [] },
-          rm: new Map<string, Uint8Array>(),
-        };
+        self.pulls.push(id);
+        return (
+          d.files ?? {
+            content: { pageCount: d.pageCount, pages: [] },
+            rm: new Map<string, Uint8Array>(),
+          }
+        );
       },
     };
     return cloud as unknown as RemarkableCloud;
@@ -241,11 +293,16 @@ export function makeEngine(opts: {
   cloud: RemarkableCloud;
   state: SyncStateStore;
   lock?: Mutex;
+  importHandwriting?: boolean;
 }) {
   return new SyncEngine(
     opts.cloud,
     opts.state,
-    () => ({ folder: "", appendNotesPages: false, importHandwriting: false }),
+    () => ({
+      folder: "",
+      appendNotesPages: false,
+      importHandwriting: opts.importHandwriting ?? false,
+    }),
     "author",
     opts.lock,
   );

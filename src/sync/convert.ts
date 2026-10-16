@@ -360,6 +360,11 @@ export function mergeGlyphs(glyphs: RmGlyph[]): RmGlyph[][] {
   return out;
 }
 
+/** Strokes that draw something: not eraser strokes, and not empty. */
+export function drawableLines(page: RmPage): RmLine[] {
+  return page.lines.filter((l) => !isEraser(l.tool) && l.points.length);
+}
+
 export function convertPages(input: ConvertInput): Candidate[] {
   const out: Candidate[] = [];
   for (const { ref, page } of input.pages) {
@@ -413,9 +418,7 @@ export function convertPages(input: ConvertInput): Candidate[] {
       });
     }
 
-    const drawable = page.lines.filter(
-      (l) => !isEraser(l.tool) && l.points.length,
-    );
+    const drawable = drawableLines(page);
     const marker = drawable.filter(
       (l) => isHighlighter(l.tool) || isShader(l.tool),
     );
@@ -525,7 +528,7 @@ function pageToNote(
   page: RmPage,
   input: ConvertInput,
 ): NoteCandidate | undefined {
-  const lines = page.lines.filter((l) => !isEraser(l.tool) && l.points.length);
+  const lines = drawableLines(page);
   const text = page.text?.text.trim();
   if (!lines.length && !text && !page.glyphs.length) return undefined;
   let title: string;

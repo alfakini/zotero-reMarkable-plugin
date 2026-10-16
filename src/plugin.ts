@@ -4,10 +4,10 @@
  */
 import { config } from "../package.json";
 import { t } from "./l10n";
-import { onPrefsLoad } from "./modules/preferences";
-import { RemarkableService } from "./modules/service";
-import { registerMenus, registerPrefsPane } from "./modules/ui";
 import { notify } from "./notify";
+import { onPrefsLoad } from "./preferences";
+import { RemarkableService } from "./service";
+import { registerMenus, registerPrefsPane } from "./ui";
 
 export type Command =
   | "sync"
