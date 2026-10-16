@@ -9,8 +9,9 @@ import { SyncEngine, type SyncReport } from "../sync/engine";
 import { Mutex } from "../sync/mutex";
 import { SyncStateStore } from "../sync/state";
 import { pdfAttachments } from "../sync/zotero";
-import { getString } from "../utils/locale";
-import { getPref, setPref } from "../utils/prefs";
+import { t } from "../l10n";
+import { notify, progress } from "../notify";
+import { getPref, setPref } from "../prefs";
 
 export class RemarkableService {
   private engine?: SyncEngine;
@@ -31,7 +32,7 @@ export class RemarkableService {
   }
 
   private getEngine(): SyncEngine {
-    if (!this.connected) throw new Error(getString("error-not-connected"));
+    if (!this.connected) throw new Error(t("error-not-connected"));
     if (!this.engine) {
       const cloud = new RemarkableCloud({
         fetch: fetch.bind(globalThis),
@@ -102,7 +103,7 @@ export class RemarkableService {
   async syncSelected(items: Zotero.Item[]) {
     const atts = await pdfAttachments(items);
     if (!atts.length) {
-      this.notify(getString("error-no-pdf"), "fail");
+      notify(t("error-no-pdf"), true);
       return;
     }
     await this.run(atts);
@@ -122,7 +123,7 @@ export class RemarkableService {
     let n = 0;
     for (const att of await pdfAttachments(items))
       if (await engine.remove(att)) n++;
-    this.notify(getString("removed-docs", { args: { count: n } }));
+    notify(t("removed-docs", { count: n }));
   }
 
   async removeImported(items: Zotero.Item[], reimport: boolean) {
@@ -131,7 +132,7 @@ export class RemarkableService {
       reimport,
     );
     if (reimport) await this.syncSelected(items);
-    else this.notify(getString("removed-imported", { args: { count: n } }));
+    else notify(t("removed-imported", { count: n }));
   }
 
   isTracked(item: Zotero.Item) {
@@ -145,60 +146,28 @@ export class RemarkableService {
 
   private async run(atts: Zotero.Item[], silent = false) {
     const engine = this.getEngine();
-    const win = silent
-      ? undefined
-      : new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-          closeOnClick: true,
-          closeTime: -1,
-        })
-          .createLine({
-            text: getString("sync-start"),
-            type: "default",
-            progress: 0,
-          })
-          .show();
+    const popup = silent ? undefined : progress(t("sync-start"));
     let report: SyncReport;
     try {
       report = await engine.sync(atts, (text, fraction) =>
-        win?.changeLine({ text, progress: Math.round((fraction ?? 0) * 100) }),
+        popup?.update(text, Math.round((fraction ?? 0) * 100)),
       );
     } catch (e) {
       Zotero.logError(e as Error);
-      win?.changeLine({
-        text: (e as Error).message,
-        type: "fail",
-        progress: 100,
-      });
-      win?.startCloseTimer(8000);
+      popup?.finish((e as Error).message, true);
       return;
     }
-    const summary = getString("sync-done", {
-      args: {
+    popup?.finish(
+      t("sync-done", {
         uploaded: report.uploaded,
         updated: report.updated,
         imported: report.imported,
         removed: report.removed,
         notes: report.notes,
-      },
-    });
-    if (win) {
-      win.changeLine({
-        text: summary,
-        type: report.errors.length ? "fail" : "success",
-        progress: 100,
-      });
-      for (const err of report.errors)
-        win.createLine({ text: err, type: "fail" });
-      win.startCloseTimer(report.errors.length ? 15000 : 5000);
-    }
-  }
-
-  notify(text: string, type: "success" | "fail" | "default" = "success") {
-    new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-      closeTime: 5000,
-    })
-      .createLine({ text, type })
-      .show();
+      }),
+      report.errors.length > 0,
+      report.errors,
+    );
   }
 
   /** (Re)start the periodic background sync from preferences. */
@@ -209,7 +178,7 @@ export class RemarkableService {
     const minutes = Number(getPref("autoSyncMinutes")) || 0;
     if (minutes <= 0) return;
     const tick = () => {
-      if (generation !== this.timerGeneration || !addon.data.alive) return;
+      if (generation !== this.timerGeneration) return;
       const next = () =>
         (Zotero as any).setTimeout(tick, Math.max(5, minutes) * 60_000);
       if (!this.connected) return next();

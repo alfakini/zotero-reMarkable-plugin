@@ -1,7 +1,7 @@
 <linkset>
   <html:link rel="localization" href="__addonRef__-preferences.ftl" />
 </linkset>
-<vbox onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })">
+<vbox onload="Zotero.__addonInstance__.onPrefsLoad(window)">
   <groupbox>
     <label><html:h2 data-l10n-id="pref-account"></html:h2></label>
     <html:p id="zotero-prefpane-__addonRef__-status"></html:p>

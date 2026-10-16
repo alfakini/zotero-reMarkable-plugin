@@ -173,8 +173,9 @@ projects.
 
 ## Credits
 
-Built on [zotero-plugin-template](https://github.com/windingwind/zotero-plugin-template)
-and [zotero-plugin-toolkit](https://github.com/windingwind/zotero-plugin-toolkit).
+Built with [zotero-plugin-scaffold](https://github.com/zotero-plugin-dev/zotero-plugin-scaffold)
+and [zotero-types](https://github.com/windingwind/zotero-types); PDFs are written with
+[pdf-lib](https://github.com/Hopding/pdf-lib).
 The protocol and format knowledge comes from
 [rmapi](https://github.com/ddvk/rmapi), [rmapi-js](https://github.com/erikbrinkman/rmapi-js),
 [rmscene](https://github.com/ricklupton/rmscene), [rmc](https://github.com/ricklupton/rmc),
@@ -184,4 +185,5 @@ The protocol and format knowledge comes from
 
 ## License
 
-AGPL-3.0-or-later
+[MIT](LICENSE). Test fixtures from rmscene are MIT-licensed by their author; see
+[test/fixtures/README.md](test/fixtures/README.md).

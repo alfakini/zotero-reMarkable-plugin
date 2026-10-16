@@ -1,7 +1,8 @@
 /** Behaviour of the preferences pane (pairing with the reMarkable cloud). */
 import { config } from "../../package.json";
 import { CONNECT_URL } from "../remarkable/cloud";
-import { getString } from "../utils/locale";
+import { t } from "../l10n";
+import { plugin } from "../plugin";
 
 const PREFIX = `zotero-prefpane-${config.addonRef}-`;
 
@@ -12,7 +13,6 @@ const all = (doc: Document, id: string) =>
 const bound = new WeakSet<Document>();
 
 export function onPrefsLoad(win: Window) {
-  addon.data.prefsWindow = win;
   const doc = win.document;
   update(doc);
   if (bound.has(doc)) return;
@@ -27,14 +27,14 @@ export function onPrefsLoad(win: Window) {
     if (id === "open-connect") Zotero.launchURL(CONNECT_URL);
     else if (id === "connect") void connect(doc, target);
     else if (id === "disconnect") {
-      addon.data.service!.disconnect();
+      plugin.service.disconnect();
       update(doc);
-    } else if (id === "sync-now") void addon.hooks.onCommand("syncAll", []);
+    } else if (id === "sync-now") void plugin.command("syncAll", []);
   });
   doc.addEventListener("change", (e) => {
     if ((e.target as Element).id === `${PREFIX}auto-sync`) {
       // The pref binding writes first; reschedule on the next tick.
-      void Promise.resolve().then(() => addon.data.service?.scheduleAutoSync());
+      void Promise.resolve().then(() => plugin.service?.scheduleAutoSync());
     }
   });
 }
@@ -44,9 +44,9 @@ async function connect(doc: Document, button: Element) {
     all(doc, "code")[0]) as HTMLInputElement | undefined;
   const code = input?.value.trim();
   if (!code) return;
-  setStatus(doc, getString("prefs-connecting"));
+  setStatus(doc, t("prefs-connecting"));
   try {
-    await addon.data.service!.connect(code);
+    await plugin.service.connect(code);
     for (const el of all(doc, "code")) (el as HTMLInputElement).value = "";
     update(doc);
   } catch (e) {
@@ -62,11 +62,8 @@ function setStatus(doc: Document, text: string, error = false) {
 }
 
 function update(doc: Document) {
-  const connected = !!addon.data.service?.connected;
-  setStatus(
-    doc,
-    getString(connected ? "prefs-connected" : "prefs-not-connected"),
-  );
+  const connected = !!plugin.service?.connected;
+  setStatus(doc, t(connected ? "prefs-connected" : "prefs-not-connected"));
   for (const el of all(doc, "pairing")) el.hidden = connected;
   for (const el of all(doc, "paired")) el.hidden = !connected;
 }

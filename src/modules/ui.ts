@@ -1,8 +1,10 @@
 /** Menus (Zotero.MenuManager, Zotero 8+) and the preferences pane. */
 import { config } from "../../package.json";
-import { getString } from "../utils/locale";
+import { t } from "../l10n";
+import { ICON } from "../notify";
+import { plugin } from "../plugin";
 
-const icon = `chrome://${config.addonRef}/content/icons/favicon.png`;
+const icon = ICON;
 const l10n = (id: string) => `${config.addonRef}-${id}`;
 
 function hasPdf(items?: Zotero.Item[]) {
@@ -29,28 +31,26 @@ export function registerMenus() {
           {
             menuType: "menuitem",
             l10nID: l10n("menu-sync"),
-            onCommand: (_e, ctx) =>
-              addon.hooks.onCommand("sync", ctx.items ?? []),
+            onCommand: (_e, ctx) => plugin.command("sync", ctx.items ?? []),
           },
           {
             menuType: "menuitem",
             l10nID: l10n("menu-reimport"),
             onShowing: (_e, ctx) =>
               ctx.setEnabled(
-                !!ctx.items?.some((i) => addon.data.service?.isTracked(i)),
+                !!ctx.items?.some((i) => plugin.service?.isTracked(i)),
               ),
-            onCommand: (_e, ctx) =>
-              addon.hooks.onCommand("reimport", ctx.items ?? []),
+            onCommand: (_e, ctx) => plugin.command("reimport", ctx.items ?? []),
           },
           {
             menuType: "menuitem",
             l10nID: l10n("menu-remove-imported"),
             onShowing: (_e, ctx) =>
               ctx.setEnabled(
-                !!ctx.items?.some((i) => addon.data.service?.isTracked(i)),
+                !!ctx.items?.some((i) => plugin.service?.isTracked(i)),
               ),
             onCommand: (_e, ctx) =>
-              addon.hooks.onCommand("removeImported", ctx.items ?? []),
+              plugin.command("removeImported", ctx.items ?? []),
           },
           { menuType: "separator" },
           {
@@ -58,10 +58,9 @@ export function registerMenus() {
             l10nID: l10n("menu-remove"),
             onShowing: (_e, ctx) =>
               ctx.setEnabled(
-                !!ctx.items?.some((i) => addon.data.service?.isTracked(i)),
+                !!ctx.items?.some((i) => plugin.service?.isTracked(i)),
               ),
-            onCommand: (_e, ctx) =>
-              addon.hooks.onCommand("remove", ctx.items ?? []),
+            onCommand: (_e, ctx) => plugin.command("remove", ctx.items ?? []),
           },
         ],
       },
@@ -77,18 +76,18 @@ export function registerMenus() {
         menuType: "menuitem",
         l10nID: l10n("menu-sync-all"),
         icon,
-        onCommand: () => addon.hooks.onCommand("syncAll", []),
+        onCommand: () => plugin.command("syncAll", []),
       },
     ],
   });
 }
 
-export function registerPrefsPane() {
-  Zotero.PreferencePanes.register({
+export function registerPrefsPane(rootURI: string) {
+  return Zotero.PreferencePanes.register({
     pluginID: config.addonID,
     id: `${config.addonRef}-prefs`,
     src: `${rootURI}content/preferences.xhtml`,
-    label: getString("prefs-title"),
+    label: t("prefs-title"),
     image: icon,
   });
 }
