@@ -197,3 +197,37 @@ test("a successful create erases nothing", async () => {
   await saveNote(attachment, candidate);
   assert.ok(!log.some((l) => l.startsWith("erase")));
 });
+
+test("a legacy record without a drawingKey patches the img and erases nothing", async () => {
+  const note = existingNote();
+  await writeSyncedNote(attachment, note.key, "T", body, drawing, {
+    rewriteBody: false,
+    adoptLegacyDrawing: true,
+  });
+  assert.deepEqual(log, ["import NEWIMG", `save ${note.key}`]);
+  assert.match(note.html, /data-attachment-key="NEWIMG"/);
+  assert.doesNotMatch(note.html, /data-attachment-key="OLD"/);
+});
+
+test("only the recorded drawingKey is erased, never another attachment", async () => {
+  const note = existingNote();
+  note.attachments.push(new FakeItem("USER"));
+  await update(note, "synced");
+  assert.deepEqual(log, ["import NEWIMG", `save ${note.key}`, "erase OLD"]);
+  assert.ok(!log.includes("erase USER"));
+});
+
+test("a recorded drawingKey that is no longer attached erases nothing", async () => {
+  const note = existingNote();
+  note.attachments = [];
+  await update(note, "synced");
+  assert.ok(!log.some((l) => l.startsWith("erase")));
+});
+
+test("a pre-existing note is never erased, even when the save fails", async () => {
+  const note = existingNote();
+  behavior.failSaveAt = 1;
+  await assert.rejects(update(note, "synced"), /^Error: save failed$/);
+  assert.ok(!log.includes(`erase ${note.key}`));
+  assert.ok(notes.has(note.key));
+});
