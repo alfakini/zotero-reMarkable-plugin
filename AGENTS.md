@@ -10,7 +10,6 @@ Zotero plugin that syncs PDFs, annotations and notes two-way with a reMarkable t
 npm start              # Zotero with hot reload (needs .env from .env.example)
 npm run build          # .scaffold/build/*.xpi + tsc --noEmit
 npm run test:unit      # Node unit tests, no Zotero needed
-npm test               # tests inside a real Zotero
 npm run lint:check     # biome check: lint + format (CI)
 npm run lint:fix       # biome check --write
 node --import tsx --test --test-name-pattern "<name>" test/unit/*.test.ts

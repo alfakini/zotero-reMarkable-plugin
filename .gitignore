@@ -1,18 +1,12 @@
-# dot files
 .DS_Store
+node_modules/
 
-# Node.js
-node_modules
-pnpm-lock.yaml
-yarn.lock
-
-# TSC
-tsconfig.tsbuildinfo
-
-# Scaffold
+# Build output and local dev config (see .env.example)
+.scaffold/
+build/
+logs/
 .env
-.scaffold
-build
-logs
+
 # Claude Code per-machine settings
 .claude/settings.local.json
+*.tsbuildinfo
