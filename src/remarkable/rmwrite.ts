@@ -9,20 +9,15 @@
  * Format reference: ricklupton/rmscene (scene_stream.py, tagged_block_writer.py).
  */
 import {
+  BLOCK,
+  type CrdtId,
   HEADER,
+  HEADER_SIZE,
   ParagraphStyle,
   parseRm,
-  type CrdtId,
   type RmParagraph,
+  TagType,
 } from "./rmscene";
-
-enum Tag {
-  ID = 0xf,
-  Length4 = 0xc,
-  Byte8 = 0x8,
-  Byte4 = 0x4,
-  Byte1 = 0x1,
-}
 
 class Writer {
   private chunks: number[] = [];
@@ -68,29 +63,29 @@ class Writer {
     this.u8(id.part1);
     this.varuint(id.part2);
   }
-  tag(index: number, type: Tag) {
+  tag(index: number, type: TagType) {
     this.varuint(index * 16 + type);
   }
   id(index: number, id: CrdtId) {
-    this.tag(index, Tag.ID);
+    this.tag(index, TagType.ID);
     this.crdtId(id);
   }
   bool(index: number, v: boolean) {
-    this.tag(index, Tag.Byte1);
+    this.tag(index, TagType.Byte1);
     this.u8(v ? 1 : 0);
   }
   int(index: number, v: number) {
-    this.tag(index, Tag.Byte4);
+    this.tag(index, TagType.Byte4);
     this.u32(v);
   }
   float(index: number, v: number) {
-    this.tag(index, Tag.Byte4);
+    this.tag(index, TagType.Byte4);
     this.f32(v);
   }
   subblock(index: number, fn: (w: Writer) => void) {
     const inner = new Writer();
     fn(inner);
-    this.tag(index, Tag.Length4);
+    this.tag(index, TagType.Length4);
     this.u32(inner.length);
     this.bytes(inner.chunks);
   }
@@ -129,7 +124,7 @@ interface RawBlock {
 function splitBlocks(data: Uint8Array): RawBlock[] {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const out: RawBlock[] = [];
-  let pos = HEADER.length + 10; // header is padded to 43 bytes
+  let pos = HEADER_SIZE;
   while (pos + 8 <= data.length) {
     const len = view.getUint32(pos, true);
     const minVersion = data[pos + 5];
@@ -149,7 +144,7 @@ function splitBlocks(data: Uint8Array): RawBlock[] {
 
 function joinBlocks(blocks: RawBlock[]): Uint8Array {
   const w = new Writer();
-  w.bytes(new TextEncoder().encode(HEADER.padEnd(43, " ")));
+  w.bytes(new TextEncoder().encode(HEADER.padEnd(HEADER_SIZE, " ")));
   for (const b of blocks) {
     w.u32(b.body.length);
     w.u8(0);
@@ -231,7 +226,7 @@ export function writePageText(
   const chars = [...text];
   const runId: CrdtId = { part1: author, part2: counter };
 
-  const rootText = block(0x07, 1, 1, (w) => {
+  const rootText = block(BLOCK.RootText, 1, 1, (w) => {
     w.id(1, ZERO);
     w.subblock(2, (w2) => {
       w2.subblock(1, (w3) =>
@@ -293,7 +288,7 @@ export function writePageText(
     w.float(4, geometry.width);
   });
 
-  const authorBlock = block(0x09, 1, 1, (w) => {
+  const authorBlock = block(BLOCK.AuthorIds, 1, 1, (w) => {
     w.varuint(authors.length);
     for (const a of authors) {
       w.subblock(0, (w2) => {
@@ -304,7 +299,7 @@ export function writePageText(
     }
   });
 
-  const pageInfo = block(0x0a, 0, 1, (w) => {
+  const pageInfo = block(BLOCK.PageInfo, 0, 1, (w) => {
     w.int(1, 1);
     w.int(2, 0);
     w.int(3, chars.length + 1);
@@ -318,20 +313,20 @@ export function writePageText(
     let wroteText = false;
     let wroteAuthors = false;
     for (const b of blocks) {
-      if (b.type === 0x09) {
+      if (b.type === BLOCK.AuthorIds) {
         out.push(authorBlock);
         wroteAuthors = true;
-      } else if (b.type === 0x07) {
+      } else if (b.type === BLOCK.RootText) {
         out.push(rootText);
         wroteText = true;
-      } else if (b.type === 0x0a) {
+      } else if (b.type === BLOCK.PageInfo) {
         out.push(pageInfo);
       } else out.push(b);
     }
     if (!wroteAuthors) out.unshift(authorBlock);
     if (!wroteText) {
       // Text goes after the scene tree declarations, before tree nodes.
-      let at = out.findIndex((b) => b.type === 0x02);
+      let at = out.findIndex((b) => b.type === BLOCK.TreeNode);
       if (at < 0) at = out.length;
       out.splice(at, 0, rootText);
     }
@@ -340,35 +335,35 @@ export function writePageText(
 
   // A fresh page, laid out like the tablet writes them.
   const sceneInfo = opts.template
-    ? splitBlocks(opts.template).find((b) => b.type === 0x0d)
+    ? splitBlocks(opts.template).find((b) => b.type === BLOCK.SceneInfo)
     : undefined;
   const blocks: RawBlock[] = [
     authorBlock,
-    block(0x00, 1, 1, (w) => {
+    block(BLOCK.MigrationInfo, 1, 1, (w) => {
       w.id(1, { part1: 1, part2: 1 });
       w.bool(2, true);
       w.bool(3, false);
     }),
     pageInfo,
     ...(sceneInfo ? [sceneInfo] : []),
-    block(0x01, 1, 1, (w) => {
+    block(BLOCK.SceneTree, 1, 1, (w) => {
       w.id(1, { part1: 0, part2: 11 });
       w.id(2, ZERO);
       w.bool(3, true);
       w.subblock(4, (w2) => w2.id(1, { part1: 0, part2: 1 }));
     }),
     rootText,
-    block(0x02, 1, 2, (w) => {
+    block(BLOCK.TreeNode, 1, 2, (w) => {
       w.id(1, { part1: 0, part2: 1 });
       w.lwwString(2, ZERO, "");
       w.lwwBool(3, ZERO, true);
     }),
-    block(0x02, 1, 2, (w) => {
+    block(BLOCK.TreeNode, 1, 2, (w) => {
       w.id(1, { part1: 0, part2: 11 });
       w.lwwString(2, { part1: 0, part2: 12 }, "Layer 1");
       w.lwwBool(3, ZERO, true);
     }),
-    block(0x04, 1, 1, (w) => {
+    block(BLOCK.GroupItem, 1, 1, (w) => {
       w.id(1, { part1: 0, part2: 1 });
       w.id(2, { part1: 0, part2: 13 });
       w.id(3, ZERO);

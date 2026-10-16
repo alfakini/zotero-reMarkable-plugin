@@ -8,6 +8,8 @@
  */
 
 export const HEADER = "reMarkable .lines file, version=6";
+/** The header is padded to this many bytes; blocks start right after. */
+export const HEADER_SIZE = 43;
 
 export interface CrdtId {
   part1: number;
@@ -127,7 +129,8 @@ export const isShader = (tool: number) =>
   (Tool.SHADER as readonly number[]).includes(tool);
 export const isEraser = (tool: number) => tool === 6 || tool === 8;
 
-enum TagType {
+/** Low nibble of a tag: the kind of value that follows. */
+export enum TagType {
   ID = 0xf,
   Length4 = 0xc,
   Byte8 = 0x8,
@@ -223,10 +226,6 @@ class TaggedReader {
     return this.ends.length ? this.ends[this.ends.length - 1] : this.r.length;
   }
 
-  remaining() {
-    return this.end - this.r.pos;
-  }
-
   private peekTag(): { index: number; type: number } | undefined {
     if (this.r.pos >= this.end) return undefined;
     const save = this.r.pos;
@@ -262,10 +261,6 @@ class TaggedReader {
   bool(index: number) {
     this.tag(index, TagType.Byte1);
     return this.r.u8() !== 0;
-  }
-  byte(index: number) {
-    this.tag(index, TagType.Byte1);
-    return this.r.u8();
   }
   int(index: number) {
     this.tag(index, TagType.Byte4);
@@ -612,14 +607,18 @@ export function toposort<T extends { id: string; left: string; right: string }>(
   return out;
 }
 
-const BLOCK = {
-  AuthorIds: 0x09,
+/** Block type codes (the last byte of the 8-byte block header). */
+export const BLOCK = {
+  MigrationInfo: 0x00,
   SceneTree: 0x01,
   TreeNode: 0x02,
   GlyphItem: 0x03,
   GroupItem: 0x04,
   LineItem: 0x05,
   RootText: 0x07,
+  AuthorIds: 0x09,
+  PageInfo: 0x0a,
+  SceneInfo: 0x0d,
 } as const;
 
 export function parseRm(data: Uint8Array): RmPage {
@@ -630,7 +629,7 @@ export function parseRm(data: Uint8Array): RmPage {
     throw new RmParseError(`unsupported .rm file (header "${header.trim()}")`);
   }
   const r = new Reader(data);
-  r.pos = 43;
+  r.pos = HEADER_SIZE;
   const t = new TaggedReader(r);
   const lines: RmLine[] = [];
   const glyphs: RmGlyph[] = [];
