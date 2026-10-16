@@ -264,6 +264,9 @@ async function eraseQuietly(item: Zotero.Item | undefined) {
  * The destructive steps come last: when the save fails, the new image and a
  * note created by this call are erased again (the note is not in the state
  * yet, so the next sync would otherwise duplicate it) and the error rethrown.
+ * The import tag goes on every note this call creates; `tagExisting` also adds
+ * it when an existing note is updated. A paired note may be one the user wrote,
+ * so only notes the plugin imported (saveNote) may be tagged on update.
  */
 async function writeNote(
   attachment: Zotero.Item,
@@ -275,6 +278,7 @@ async function writeNote(
     svgKeys: string[],
   ) => string,
   stale: (current: string, svgKeys: string[], img?: NoteDrawing) => string[],
+  tagExisting: boolean,
 ): Promise<{ key: string; drawingKey?: string }> {
   const parentID = attachment.parentID;
   if (!parentID) throw new Error("Notes need a parent item");
@@ -303,7 +307,7 @@ async function writeNote(
       img = { key: image.key, width: drawing.width, height: drawing.height };
     }
     note.setNote(html(img, current, svgKeys));
-    note.addTag(IMPORT_TAG);
+    if (current === undefined || tagExisting) note.addTag(IMPORT_TAG);
     await note.saveTx();
   } catch (e) {
     await eraseQuietly(image);
@@ -343,6 +347,7 @@ export async function saveNote(
     // Drawings the previous version of this note embedded (SVGs only; images
     // of any other kind are left alone).
     (current, svgKeys) => staleDrawingKeys(current, svgKeys),
+    true,
   );
   return written.key;
 }
@@ -400,5 +405,7 @@ export function writeSyncedNote(
       svgKeys.includes(opts.drawingKey)
         ? [opts.drawingKey]
         : [],
+    // The paired note may be the user's own: tag it only when created here.
+    false,
   );
 }
