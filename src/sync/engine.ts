@@ -36,6 +36,8 @@ import {
   canSaveCandidate,
   type CandidateFailure,
   formatCandidateFailures,
+  invalidatedRecord,
+  isRecordCurrent,
   keysToErase,
   needsPull,
   newUploadedDoc,
@@ -356,8 +358,17 @@ export class SyncEngine {
       }
       const rec = doc.imported[c.rmKey];
       if (rec) {
-        // Unchanged, or deleted by the user in Zotero: leave it alone.
-        if (rec.hash === c.hash || !existsByKey(att.libraryID, rec.zoteroKey))
+        // Unchanged since the current converter imported it, or deleted by
+        // the user in Zotero: leave it alone.
+        if (
+          isRecordCurrent(
+            rec,
+            c.hash,
+            doc.converterVersion,
+            CONVERTER_VERSION,
+          ) ||
+          !existsByKey(att.libraryID, rec.zoteroKey)
+        )
           continue;
       }
       try {
@@ -375,6 +386,9 @@ export class SyncEngine {
           `[reMarkable] could not import ${c.rmKey}: ${e}\n${(e as Error)?.stack}`,
         );
         failures.push({ rmKey: c.rmKey, message });
+        // The document moves to the current converter version below, so keep
+        // a failed re-import of an old record from looking current.
+        if (rec) doc.imported[c.rmKey] = invalidatedRecord(rec);
       }
     }
     if (failures.length) {

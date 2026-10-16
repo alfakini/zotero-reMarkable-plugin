@@ -3,12 +3,15 @@ import { test } from "node:test";
 import {
   canSaveCandidate,
   formatCandidateFailures,
+  invalidatedRecord,
+  isRecordCurrent,
   keysToErase,
   needsPull,
   newUploadedDoc,
   nextRmDocHash,
   readPages,
 } from "../../src/sync/pullPlan";
+import { CONVERTER_VERSION } from "../../src/sync/convert";
 
 const imported = {
   "p1/g/a": { kind: "annotation" as const },
@@ -85,6 +88,12 @@ test("pull is needed when the previous pull was incomplete", () => {
   assert.equal(needsPull({ ...doc, pullIncomplete: true }, "h", 3), true);
 });
 
+test("documents imported by converter version 3 are refreshed", () => {
+  const doc = { rmDocHash: "h", converterVersion: 3 };
+  assert.ok(CONVERTER_VERSION >= 4);
+  assert.equal(needsPull(doc, "h", CONVERTER_VERSION), true);
+});
+
 test("a freshly uploaded document does not need a pull on the next sync", () => {
   const doc = newUploadedDoc(
     {
@@ -154,4 +163,23 @@ test("a page without an .rm blob is empty, not unreadable", () => {
     true,
   );
   assert.deepEqual(out, ["p2/g/x"]);
+});
+
+test("a record is current only for the same hash and converter version", () => {
+  const rec = { hash: "h" };
+  assert.equal(isRecordCurrent(rec, "h", 4, 4), true);
+  assert.equal(isRecordCurrent(rec, "other", 4, 4), false);
+  // Imported by an older converter: the raw hash still matches, but the
+  // converter output changed, so it must be re-imported once.
+  assert.equal(isRecordCurrent(rec, "h", 3, 4), false);
+  assert.equal(isRecordCurrent(rec, "h", undefined, 4), false);
+  assert.equal(isRecordCurrent(rec, "h", 3, CONVERTER_VERSION), false);
+});
+
+test("a failed re-import stays stale after the version is advanced", () => {
+  const rec = { hash: "h", zoteroKey: "K", kind: "annotation" as const };
+  const stale = invalidatedRecord(rec);
+  assert.equal(stale.zoteroKey, "K");
+  assert.equal(rec.hash, "h");
+  assert.equal(isRecordCurrent(stale, "h", 4, 4), false);
 });
