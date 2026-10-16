@@ -36,7 +36,7 @@
     "@biomejs/biome": "2.5.15",
     "@types/node": "^24.10.0",
     "tsx": "^4.23.15",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "zotero-plugin-scaffold": "^0.9.2",
     "zotero-types": "^4.1.3"
   }
