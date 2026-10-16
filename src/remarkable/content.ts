@@ -136,13 +136,13 @@ export function reconcileContent(
     (i) => !seen.has(i),
   );
   const width = idxWidth(missing.length);
+  // Computed once: every new page shares this prefix and differs only in the
+  // fixed-width suffix. Re-reading it per page would nest the idx values.
+  const top = maxIdx(cp) || "b";
   missing.forEach((r, k) => {
     cp.pages.push({
       id: newId(),
-      idx: {
-        timestamp: ts,
-        value: `${maxIdx(cp) || "b"}${idxKey(k + 1, width)}`,
-      },
+      idx: { timestamp: ts, value: `${top}${idxKey(k + 1, width)}` },
       redir: { timestamp: ts, value: r },
     });
   });

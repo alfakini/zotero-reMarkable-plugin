@@ -112,6 +112,31 @@ test("built content maps every PDF page in order; reconcile keeps ids", () => {
   );
 });
 
+test("reconcileContent gives added pages idx values sharing one prefix", () => {
+  let n = 0;
+  const newId = () => `id${n++}`;
+  const c = buildPdfContent({
+    pageCount: 2,
+    sizeInBytes: 1,
+    newId,
+    authorId: "me",
+  });
+  const top = c.cPages.pages.reduce(
+    (m: string, p: any) => (p.idx.value > m ? p.idx.value : m),
+    "",
+  );
+  const grown = reconcileContent(c, 8, 2, newId, "me");
+  const added = grown.cPages.pages.slice(2).map((p: any) => p.idx.value);
+  assert.equal(added.length, 6);
+  const suffixes = added.map((v: string) => {
+    assert.ok(v.startsWith(top), `${v} should start with ${top}`);
+    return v.slice(top.length);
+  });
+  assert.equal(new Set(suffixes.map((s: string) => s.length)).size, 1);
+  assert.deepEqual([...suffixes].sort(), suffixes);
+  assert.equal(new Set(suffixes).size, suffixes.length);
+});
+
 test("toposort orders a CRDT chain", () => {
   const items = [
     { id: "1:12", left: "1:11", right: "0:0" },
