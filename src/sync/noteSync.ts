@@ -4,7 +4,11 @@
  * both ways (see notes.ts for the conventions).
  */
 import { addInsertedPage, deletePage, pageRefs } from "../remarkable/content";
-import type { RemarkableCloud } from "../remarkable/cloud";
+import {
+  isTabletChangedError,
+  type ChangedDocument,
+  type RemarkableCloud,
+} from "../remarkable/cloud";
 import { uuid4 } from "../remarkable/hash";
 import {
   isEraser,
@@ -15,24 +19,31 @@ import {
 import { writePageText } from "../remarkable/rmwrite";
 import { fingerprint, renderSvg } from "./convert";
 import {
-  decide,
   htmlToParagraphs,
   isSyncedNoteTitle,
-  mergeConflict,
+  applyPairPlan,
+  landedPages,
   nextNoteTitle,
+  pairState,
   plainText,
-  withTabletStyles,
+  planPair,
+  TabletCommits,
 } from "./notes";
 import type { DocState } from "./state";
-import { childNotes, trashByKey, writeSyncedNote } from "./zotero";
+import {
+  childNotesWithTrashed,
+  existsInLibrary,
+  trashByKey,
+  writeSyncedNote,
+} from "./zotero";
 
 export interface NoteSyncResult {
   toTablet: number;
   toZotero: number;
   created: number;
   removed: number;
-  /** New document hash if the tablet copy was changed. */
-  newHash?: string;
+  /** Set if the tablet copy was changed. */
+  changed?: ChangedDocument;
 }
 
 /** Bump to make every paired note re-sync once (e.g. after a rules fix). */
@@ -45,9 +56,15 @@ export function notesFingerprint(att: Zotero.Item, doc: DocState) {
   );
   return fingerprint([
     NOTE_SYNC_VERSION,
-    ...childNotes(att)
-      .filter((n) => mapped.has(n.key) || isSyncedNoteTitle(n.getNoteTitle()))
-      .map((n) => [n.key, n.getNote()]),
+    ...childNotesWithTrashed(att)
+      // Trashed notes only matter while paired: trashing, restoring or
+      // emptying the trash for them must trigger a sync.
+      .filter((n) =>
+        n.deleted
+          ? mapped.has(n.key)
+          : mapped.has(n.key) || isSyncedNoteTitle(n.getNoteTitle()),
+      )
+      .map((n) => [n.key, n.deleted ? "trashed" : n.getNote()]),
   ]);
 }
 
@@ -90,9 +107,13 @@ export async function syncNotes(
     inserted.map((r) => files.rm.get(r.id)).find(Boolean) ??
     [...files.rm.values()][0];
 
-  const notes = childNotes(att);
-  const noteByKey = new Map(notes.map((n) => [n.key, n]));
-  const titles = () => childNotes(att).map((n) => n.getNoteTitle());
+  const allNotes = childNotesWithTrashed(att);
+  const notes = allNotes.filter((n) => !n.deleted);
+  const noteByKey = new Map(allNotes.map((n) => [n.key, n]));
+  // Titles of the live notes by key, kept current as notes are trashed,
+  // retitled or created below.
+  const titleByKey = new Map(notes.map((n) => [n.key, n.getNoteTitle()]));
+  const titles = () => [...titleByKey.values()];
 
   const tabletBody = (page?: RmPage): RmParagraph[] =>
     (page?.rootText?.paragraphs ?? []).filter((p) => p.text.trim());
@@ -103,77 +124,88 @@ export async function syncNotes(
     return lines.length ? renderSvg(lines) : undefined;
   };
 
+  // Records only change after the write that makes them true: the base of a
+  // pair whose page is rewritten, new pairings for created pages and removed
+  // pairings are applied once updateDocument succeeds, so a failure anywhere
+  // leaves state matching what both sides really hold (see applyPairPlan).
+  const tabletCommits = new TabletCommits();
+
   // 1. Existing pairs.
   for (const [pageId, rec] of Object.entries(notePages)) {
     const note = noteByKey.get(rec.noteKey);
-    if (!livePages.has(pageId)) {
+    // A note dragged to another parent is no longer among this item's
+    // notes but still exists: pause the pair rather than delete the page.
+    const state = pairState(
+      livePages.has(pageId),
+      note ? !!note.deleted : undefined,
+      !note && existsInLibrary(att.libraryID, rec.noteKey),
+    );
+    if (state === "pageGone") {
       // Page deleted on the tablet -> move the note to Zotero's trash.
-      if (note) await trashByKey(att.libraryID, rec.noteKey);
+      if (note && !note.deleted) {
+        await trashByKey(att.libraryID, rec.noteKey);
+        titleByKey.delete(rec.noteKey);
+      }
       delete notePages[pageId];
       result.removed++;
       continue;
     }
-    if (!note) {
-      // Note deleted in Zotero -> delete the page on the tablet.
+    if (state === "noteGone") {
+      // Note gone from the library -> delete the page on the tablet.
       content = deletePage(content, pageId, authorId);
       contentChanged = true;
-      delete notePages[pageId];
+      tabletCommits.defer(() => delete notePages[pageId]);
       result.removed++;
       continue;
     }
+    // Trashed or reparented note: keep the pair and the page as they are until
+    // the note is restored, moved back or erased.
+    if (state === "paused" || !note) continue;
     const page = pageOf(pageId);
     const tablet = tabletBody(page);
     const parsedNote = htmlToParagraphs(note.getNote());
     let title = parsedNote.title;
     if (!isSyncedNoteTitle(title)) title = nextNoteTitle(titles());
     const zotero = parsedNote.body;
-    const zPlain = plainText(zotero);
     const tPlain = plainText(tablet);
     if (rec.base === undefined && rec.migrated) rec.base = tPlain;
     const drawing = drawingOf(page);
     const drawingHash = drawing ? fingerprint(drawing.markup) : undefined;
 
-    let noteBody: RmParagraph[] | undefined;
-    switch (decide(rec.base, zPlain, tPlain)) {
-      case "toTablet":
-        writes.set(
-          pageId,
-          pageText(files.rm.get(pageId), withTabletStyles(zotero, tablet)),
-        );
-        rec.base = zPlain;
-        result.toTablet++;
-        break;
-      case "toZotero":
-        noteBody = tablet;
-        rec.base = tPlain;
-        result.toZotero++;
-        break;
-      case "conflict": {
-        const merged = mergeConflict(zotero, tablet);
-        writes.set(pageId, pageText(files.rm.get(pageId), merged));
-        noteBody = merged;
-        rec.base = plainText(merged);
-        result.toTablet++;
-        result.toZotero++;
-        break;
-      }
-      case "none":
-        rec.base = zPlain;
+    const plan = planPair(rec.base, zotero, tablet);
+    if (plan.tabletBody) {
+      writes.set(pageId, pageText(files.rm.get(pageId), plan.tabletBody));
+      result.toTablet++;
     }
-    if (
-      noteBody ||
-      drawingHash !== rec.drawingHash ||
-      title !== parsedNote.title
-    ) {
-      await writeSyncedNote(
-        att,
-        rec.noteKey,
-        title,
-        noteBody ?? zotero,
-        drawing,
-      );
-      rec.drawingHash = drawingHash;
-    }
+    if (plan.zoteroBody) result.toZotero++;
+    // Regenerate the body only when its text must change (or the title was
+    // fixed); a drawing-only change swaps just the plugin's image.
+    const rewriteBody = !!plan.zoteroBody || title !== parsedNote.title;
+    const needsWrite = rewriteBody || drawingHash !== rec.drawingHash;
+    await applyPairPlan(
+      rec,
+      plan,
+      needsWrite
+        ? async () => {
+            const written = await writeSyncedNote(
+              att,
+              rec.noteKey,
+              title,
+              plan.zoteroBody ?? zotero,
+              drawing,
+              {
+                rewriteBody,
+                drawingKey: rec.drawingKey,
+                adoptLegacyDrawing: rec.drawingHash !== undefined,
+              },
+            );
+            titleByKey.set(rec.noteKey, title);
+            rec.drawingHash = drawingHash;
+            rec.drawingKey = written.drawingKey;
+          }
+        : undefined,
+      tabletCommits,
+    );
   }
 
   // 2. Pages added on the tablet -> new notes.
@@ -184,23 +216,28 @@ export async function syncNotes(
     const body = tabletBody(page);
     const drawing = drawingOf(page);
     if (!body.length && !drawing) continue; // still blank
-    const key = await writeSyncedNote(
+    const title = nextNoteTitle(titles());
+    const written = await writeSyncedNote(
       att,
       undefined,
-      nextNoteTitle(titles()),
+      title,
       body,
       drawing,
+      { rewriteBody: true },
     );
     notePages[ref.id] = {
-      noteKey: key,
+      noteKey: written.key,
       base: plainText(body),
       drawingHash: drawing ? fingerprint(drawing.markup) : undefined,
+      drawingKey: written.drawingKey,
     };
-    pagedNotes.add(key);
+    pagedNotes.add(written.key);
+    titleByKey.set(written.key, title);
     result.created++;
   }
 
   // 3. "reMarkable Note …" notes made in Zotero -> new pages.
+  const addedPageIds: string[] = [];
   for (const note of notes) {
     if (pagedNotes.has(note.key) || !isSyncedNoteTitle(note.getNoteTitle()))
       continue;
@@ -209,16 +246,36 @@ export async function syncNotes(
     content = addInsertedPage(content, pageId, authorId);
     contentChanged = true;
     writes.set(pageId, pageText(undefined, body));
-    notePages[pageId] = { noteKey: note.key, base: plainText(body) };
+    addedPageIds.push(pageId);
+    // Paired only once the page exists on the tablet.
+    tabletCommits.defer(() => {
+      notePages[pageId] = { noteKey: note.key, base: plainText(body) };
+    });
     result.created++;
   }
 
   if (writes.size || contentChanged) {
-    result.newHash = await cloud.updateDocument(doc.rmDocId, {
-      pages: writes,
-      content: contentChanged ? content : undefined,
-    });
+    try {
+      result.changed = await cloud.updateDocument(
+        doc.rmDocId,
+        {
+          pages: writes,
+          content: contentChanged ? content : undefined,
+        },
+        { expectedHash: files.hash },
+      );
+    } catch (e) {
+      // The root PUT is never retried: the server may have applied it with
+      // only the response lost. Record the pairings if the new pages exist,
+      // or the next sync would import them again and create more pages.
+      if (addedPageIds.length && !isTabletChangedError(e)) {
+        const live = await cloud.getPageIds(doc.rmDocId).catch(() => undefined);
+        if (landedPages(addedPageIds, live).length) tabletCommits.commit();
+      }
+      throw e;
+    }
   }
+  tabletCommits.commit();
   return result;
 
   function pageText(existing: Uint8Array | undefined, body: RmParagraph[]) {

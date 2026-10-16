@@ -6,7 +6,7 @@
  * document index. Changing anything means uploading new blobs, a new document
  * index, a new root index, and finally compare-and-swapping the root pointer.
  */
-import { buildPdfContent, reconcileContent } from "./content";
+import { buildPdfContent, pageRefs, reconcileContent } from "./content";
 import { crc32cHeader, sha256Hex, uuid4 } from "./hash";
 
 export const AUTH_HOST = "https://webapp-prod.cloud.remarkable.engineering";
@@ -54,6 +54,23 @@ export class RemarkableError extends Error {
 }
 
 class ConflictError extends RemarkableError {}
+
+/** A file to write into a document: its name in the index and its content. */
+type FileUpdate = { name: string; data: Uint8Array | string };
+
+/** Result of a committed change to one document. */
+export interface ChangedDocument {
+  /** Hash of the document index after the change. */
+  hash: string;
+  /** Hash of the document entry the change was merged onto. */
+  baseHash: string;
+}
+
+/** Computes the files to change from a document's current file entries. */
+type DocumentBuilder = (ctx: {
+  files: IndexEntry[];
+  readText: (entry: IndexEntry) => Promise<string>;
+}) => Promise<FileUpdate[] | undefined> | FileUpdate[] | undefined;
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -249,7 +266,14 @@ export class RemarkableCloud {
   /** Upload a blob and return its hash. */
   async putBlob(filename: string, data: Uint8Array | string): Promise<string> {
     const bytes = typeof data === "string" ? enc.encode(data) : data;
-    const hash = await sha256Hex(bytes);
+    return this.putHashed(filename, bytes, await sha256Hex(bytes));
+  }
+
+  private async putHashed(
+    filename: string,
+    bytes: Uint8Array,
+    hash: string,
+  ): Promise<string> {
     const res = await this.request(`/sync/v3/files/${hash}`, {
       method: "PUT",
       headers: {
@@ -330,27 +354,46 @@ export class RemarkableCloud {
     throw new RemarkableError(`PUT root: ${res.status} ${text}`, res.status);
   }
 
-  /** Upload files for a document and return its root-index entry. */
-  private async putDocument(
-    id: string,
-    files: { name: string; data: Uint8Array | string }[],
-    keep: IndexEntry[] = [],
-  ): Promise<IndexEntry> {
-    const names = new Set(files.map((f) => f.name));
-    const entries = keep.filter((e) => !names.has(e.id));
+  /**
+   * Upload file blobs and return their index entries (content-addressed). A
+   * blob already uploaded under the same name and hash according to `done` is
+   * not sent again.
+   */
+  private async uploadFiles(
+    files: FileUpdate[],
+    done?: Map<string, IndexEntry>,
+  ): Promise<IndexEntry[]> {
+    const out: IndexEntry[] = [];
     for (const f of files) {
       const bytes = typeof f.data === "string" ? enc.encode(f.data) : f.data;
-      const hash = await this.putBlob(f.name, bytes);
-      entries.push({
-        hash,
-        type: "0",
-        id: f.name,
-        subfiles: 0,
-        size: bytes.length,
-      });
+      const hash = await sha256Hex(bytes);
+      const key = `${f.name}\0${hash}`;
+      let entry = done?.get(key);
+      if (!entry) {
+        await this.putHashed(f.name, bytes, hash);
+        entry = {
+          hash,
+          type: "0",
+          id: f.name,
+          subfiles: 0,
+          size: bytes.length,
+        };
+        done?.set(key, entry);
+      }
+      out.push(entry);
     }
-    const index = serializeIndex(id, entries);
-    const hash = await this.putBlob(`${id}.docSchema`, index);
+    return out;
+  }
+
+  /** Upload a document index built from `entries` and return its root entry. */
+  private async putDocIndex(
+    id: string,
+    entries: IndexEntry[],
+  ): Promise<IndexEntry> {
+    const hash = await this.putBlob(
+      `${id}.docSchema`,
+      serializeIndex(id, entries),
+    );
     return {
       hash,
       type: "0",
@@ -360,11 +403,92 @@ export class RemarkableCloud {
     };
   }
 
+  /** Upload files for a brand-new document and return its root-index entry. */
+  private async putDocument(
+    id: string,
+    files: FileUpdate[],
+  ): Promise<IndexEntry> {
+    return this.putDocIndex(id, await this.uploadFiles(files));
+  }
+
+  /** Commit a brand-new document (fresh id, nothing to merge with). */
   private async commitDocument(docEntry: IndexEntry) {
     await this.updateRoot((entries) => [
       ...entries.filter((e) => e.id !== docEntry.id),
       docEntry,
     ]);
+  }
+
+  /**
+   * Change some files of an existing document. `build` computes the changed
+   * files from the document's file entries (and a way to read their blobs);
+   * it first runs on `baseFiles`, what the caller read. If the root has moved
+   * on and the document is no longer `base`, then by default `build` runs again
+   * on the document's CURRENT entries (so derived files such as .content and
+   * .metadata are computed from the tablet's latest versions) and only those
+   * files are replaced by name. With `onChanged: "throw"` a changed document
+   * instead aborts the call with a RemarkableError, for callers whose files
+   * were derived from data that cannot be re-derived here. `build` may return
+   * undefined for "nothing to change". Uploaded blobs are content-addressed and
+   * are not sent twice within one call. Returns the hash of the committed
+   * document index (`hash`) and the hash of the document entry the change was
+   * merged onto (`baseHash`: the entry `build` last ran on, which is newer than
+   * `base` when the tablet committed in between).
+   */
+  private async changeDocument(
+    id: string,
+    base: IndexEntry,
+    baseFiles: IndexEntry[],
+    build: DocumentBuilder,
+    opts: {
+      ifMissing?: "throw" | "skip";
+      onChanged?: "rebuild" | "throw";
+    } = {},
+  ): Promise<ChangedDocument> {
+    const ifMissing = opts.ifMissing ?? "throw";
+    const uploaded = new Map<string, IndexEntry>();
+    const derive = async (
+      files: IndexEntry[],
+    ): Promise<IndexEntry | undefined> => {
+      const updates = await build({
+        files,
+        readText: (e) => this.getText(e.hash, e.id),
+      });
+      if (!updates) return undefined;
+      const changed = await this.uploadFiles(updates, uploaded);
+      const names = new Set(changed.map((e) => e.id));
+      return this.putDocIndex(id, [
+        ...files.filter((e) => !names.has(e.id)),
+        ...changed,
+      ]);
+    };
+    // Built from what the caller read; reused while the document is unchanged.
+    const prepared = await derive(baseFiles);
+    if (!prepared) return { hash: base.hash, baseHash: base.hash };
+    let committed = prepared.hash;
+    let mergedOn = base.hash;
+    await this.updateRoot(async (entries) => {
+      const current = entries.find((e) => e.id === id);
+      if (!current) {
+        if (ifMissing === "skip") return entries;
+        throw new RemarkableError(`Document ${id} not found`, 404);
+      }
+      let entry: IndexEntry | undefined = prepared;
+      mergedOn = current.hash;
+      if (current.hash !== base.hash) {
+        if (opts.onChanged === "throw") {
+          throw new RemarkableError(TABLET_CHANGED);
+        }
+        entry = await derive(await this.getDocEntries(current));
+        if (!entry) {
+          committed = current.hash;
+          return entries;
+        }
+      }
+      committed = entry.hash;
+      return [...entries.filter((e) => e.id !== id), entry];
+    });
+    return { hash: committed, baseHash: mergedOn };
   }
 
   /** List all documents and folders (excluding deleted ones). */
@@ -460,55 +584,83 @@ export class RemarkableCloud {
     return (await this.getRootEntries(root)).find((e) => e.id === id);
   }
 
+  /** A document's root entry and file entries, or undefined if it is gone. */
+  private async openDocument(id: string) {
+    const entry = await this.findDocument(id);
+    if (!entry) return undefined;
+    return { entry, files: await this.getDocEntries(entry) };
+  }
+
   /**
    * Replace the PDF of an existing document, keeping its .rm annotation files
    * and page mapping. The new PDF must keep the original page order.
+   * Returns the new document hash and the hash of the entry it was merged onto.
    */
-  async replacePdf(id: string, pdf: Uint8Array, pageCount: number) {
+  async replacePdf(
+    id: string,
+    pdf: Uint8Array,
+    pageCount: number,
+  ): Promise<ChangedDocument> {
     const docEntry = await this.findDocument(id);
     if (!docEntry) throw new RemarkableError(`Document ${id} not found`, 404);
     const files = await this.getDocEntries(docEntry);
-    const metaEntry = files.find((f) => f.id === `${id}.metadata`);
-    const metadata = metaEntry
-      ? (JSON.parse(
-          await this.getText(metaEntry.hash, metaEntry.id),
-        ) as RmMetadata)
-      : undefined;
-    const updates: { name: string; data: Uint8Array | string }[] = [
-      { name: `${id}.pdf`, data: pdf },
-    ];
-    if (metadata) {
-      metadata.lastModified = String(Date.now());
-      updates.push({ name: `${id}.metadata`, data: JSON.stringify(metadata) });
-    }
-    const contentEntry = files.find((f) => f.id === `${id}.content`);
-    const oldContent = contentEntry
-      ? JSON.parse(await this.getText(contentEntry.hash, contentEntry.id))
-      : undefined;
-    const content = reconcileContent(
-      oldContent,
-      pageCount,
-      pdf.length,
-      uuid4,
-      this.opts.clientId ?? uuid4(),
-    );
-    updates.push({ name: `${id}.content`, data: JSON.stringify(content) });
-    const entry = await this.putDocument(id, updates, files);
-    await this.commitDocument(entry);
+    return this.changeDocument(id, docEntry, files, async (cur) => {
+      // Derived from the entries the build is given, so after a conflict the
+      // pages and metadata the tablet changed meanwhile are kept.
+      const updates: FileUpdate[] = [{ name: `${id}.pdf`, data: pdf }];
+      const metaEntry = cur.files.find((f) => f.id === `${id}.metadata`);
+      if (metaEntry) {
+        const metadata = JSON.parse(
+          await cur.readText(metaEntry),
+        ) as RmMetadata;
+        metadata.lastModified = String(Date.now());
+        updates.push({
+          name: `${id}.metadata`,
+          data: JSON.stringify(metadata),
+        });
+      }
+      const contentEntry = cur.files.find((f) => f.id === `${id}.content`);
+      const oldContent = contentEntry
+        ? JSON.parse(await cur.readText(contentEntry))
+        : undefined;
+      const content = reconcileContent(
+        oldContent,
+        pageCount,
+        pdf.length,
+        uuid4,
+        this.opts.clientId ?? uuid4(),
+      );
+      updates.push({ name: `${id}.content`, data: JSON.stringify(content) });
+      return updates;
+    });
   }
 
   /**
    * Write page files and/or a new `.content` for a document in one commit.
-   * `pages` maps page id -> `.rm` bytes.
+   * `pages` maps page id -> `.rm` bytes. The caller derived both from the
+   * document it read and they cannot be re-derived here, so when the tablet
+   * changed the document meanwhile this throws instead of overwriting it.
+   * `expectedHash` is the hash of the document the caller derived its writes
+   * from (the `hash` of `getDocumentFiles`): the call throws, before writing
+   * anything, if the document is not at that hash any more. Resolves to the
+   * new document hash and the hash it was merged onto (both the current hash
+   * when `changes` is empty).
    */
   async updateDocument(
     id: string,
     changes: { pages?: Map<string, Uint8Array>; content?: unknown },
-  ) {
+    opts: { expectedHash?: string } = {},
+  ): Promise<ChangedDocument> {
     const docEntry = await this.findDocument(id);
     if (!docEntry) throw new RemarkableError(`Document ${id} not found`, 404);
+    if (
+      opts.expectedHash !== undefined &&
+      docEntry.hash !== opts.expectedHash
+    ) {
+      throw new RemarkableError(TABLET_CHANGED);
+    }
     const files = await this.getDocEntries(docEntry);
-    const updates: { name: string; data: Uint8Array | string }[] = [];
+    const updates: FileUpdate[] = [];
     for (const [pageId, data] of changes.pages ?? []) {
       updates.push({ name: `${id}/${pageId}.rm`, data });
     }
@@ -518,10 +670,12 @@ export class RemarkableCloud {
         data: JSON.stringify(changes.content),
       });
     }
-    if (!updates.length) return docEntry.hash;
-    const entry = await this.putDocument(id, updates, files);
-    await this.commitDocument(entry);
-    return entry.hash;
+    if (!updates.length) {
+      return { hash: docEntry.hash, baseHash: docEntry.hash };
+    }
+    return this.changeDocument(id, docEntry, files, () => updates, {
+      onChanged: "throw",
+    });
   }
 
   /** Move a document to the trash (the tablet then deletes it). */
@@ -529,19 +683,35 @@ export class RemarkableCloud {
     const docEntry = await this.findDocument(id);
     if (!docEntry) return;
     const files = await this.getDocEntries(docEntry);
-    const metaEntry = files.find((f) => f.id === `${id}.metadata`);
-    if (!metaEntry) return;
-    const metadata = JSON.parse(
-      await this.getText(metaEntry.hash, metaEntry.id),
-    );
-    metadata.parent = "trash";
-    metadata.lastModified = String(Date.now());
-    const entry = await this.putDocument(
+    await this.changeDocument(
       id,
-      [{ name: `${id}.metadata`, data: JSON.stringify(metadata) }],
+      docEntry,
       files,
+      async (cur) => {
+        const entry = cur.files.find((f) => f.id === `${id}.metadata`);
+        if (!entry) return undefined;
+        const metadata = JSON.parse(await cur.readText(entry));
+        metadata.parent = "trash";
+        metadata.lastModified = String(Date.now());
+        return [{ name: `${id}.metadata`, data: JSON.stringify(metadata) }];
+      },
+      { ifMissing: "skip" },
     );
-    await this.commitDocument(entry);
+  }
+
+  /**
+   * The page ids in a document's live `.content` (one root read, the index and
+   * the .content blob; no pages), or undefined if the document is gone. Used to
+   * find out whether a write whose response was lost reached the server.
+   */
+  async getPageIds(id: string): Promise<Set<string> | undefined> {
+    const doc = await this.openDocument(id);
+    if (!doc) return undefined;
+    const entry = doc.files.find((f) => f.id === `${id}.content`);
+    const content = entry
+      ? JSON.parse(await this.getText(entry.hash, entry.id))
+      : {};
+    return new Set(pageRefs(content).map((r) => r.id));
   }
 
   /** Download the .content and every .rm page file of a document. */
@@ -561,6 +731,14 @@ export class RemarkableCloud {
     });
     return { hash: entry.hash, content, rm, files };
   }
+}
+
+const TABLET_CHANGED =
+  "The tablet changed this document while syncing; nothing was written, the next sync retries";
+
+/** True for the error that says a write was refused and nothing was written. */
+export function isTabletChangedError(e: unknown) {
+  return e instanceof RemarkableError && e.message === TABLET_CHANGED;
 }
 
 function backoff(attempt: number) {

@@ -1,13 +1,24 @@
 /** Zotero-side helpers: read Zotero data and write imported annotations. */
 import type { AnnotationCandidate, NoteCandidate } from "./convert";
-import { isSyncedNoteTitle, paragraphsToHtml } from "./notes";
+import { fitInkPosition } from "./inkFit";
+import {
+  drawingImg,
+  eraseIfCreatedOnError,
+  importSaveThenErase,
+  isSyncedNoteTitle,
+  legacyDrawingKey,
+  type NoteDrawing,
+  paragraphsToHtml,
+  patchDrawing,
+  staleDrawingKeys,
+  wrapNoteHtml,
+} from "./notes";
 import type { RmParagraph } from "../remarkable/rmscene";
 import type { DocState } from "./state";
 import type { ZAnnotation, ZNote } from "./types";
 
 export const IMPORT_TAG = "reMarkable";
 const AUTHOR = "reMarkable";
-const POSITION_MAX = 65000;
 
 /** PDF attachments for a mix of regular items and attachments. */
 export async function pdfAttachments(
@@ -129,38 +140,27 @@ export function knownPageLabels(attachment: Zotero.Item): string[] {
   return labels;
 }
 
-/** Thin out ink paths until the position fits Zotero's size limit. */
-function fitPosition(position: any) {
-  let pos = position;
-  let step = 2;
-  while (JSON.stringify(pos).length > POSITION_MAX && step < 64) {
-    pos = {
-      ...pos,
-      paths: (position.paths as number[][]).map((p) => {
-        const out: number[] = [];
-        for (let i = 0; i < p.length; i += 2 * step) out.push(p[i], p[i + 1]);
-        out.push(p[p.length - 2], p[p.length - 1]);
-        return out;
-      }),
-    };
-    step *= 2;
-  }
-  return pos;
-}
-
 export async function saveAnnotation(
   attachment: Zotero.Item,
   c: AnnotationCandidate,
   key?: string,
 ): Promise<string> {
+  let position = c.json.position;
+  if (c.json.type === "ink") {
+    const fitted = fitInkPosition(c.json.position as any);
+    position = fitted.position as any;
+    if (fitted.droppedPaths)
+      Zotero.debug(
+        `[reMarkable] ink ${c.rmKey} too large: dropped ${fitted.droppedPaths} stroke(s)`,
+      );
+  }
   const json: any = {
     key: key ?? (Zotero as any).DataObjectUtilities.generateKey(),
     type: c.json.type,
     color: c.json.color,
     pageLabel: c.json.pageLabel,
     sortIndex: c.json.sortIndex,
-    position:
-      c.json.type === "ink" ? fitPosition(c.json.position) : c.json.position,
+    position,
     comment: c.json.comment ?? "",
     authorName: AUTHOR,
     tags: [{ name: IMPORT_TAG }],
@@ -168,6 +168,14 @@ export async function saveAnnotation(
   if (c.json.type === "highlight") json.text = c.json.text ?? "";
   const item = await Zotero.Annotations.saveFromJSON(attachment, json);
   return item.key;
+}
+
+/**
+ * A failed cleanup can leave an orphan note or image that later passes act on,
+ * so surface it in the Zotero error log instead of swallowing it.
+ */
+function logCleanupError(err: unknown) {
+  Zotero.logError(err as Error);
 }
 
 function escapeHtml(s: string) {
@@ -180,45 +188,69 @@ export async function saveNote(
   c: NoteCandidate,
   existingKey?: string,
 ): Promise<string> {
-  const parentID = attachment.parentID ?? attachment.id;
+  // A note cannot be a child of an attachment; callers skip these candidates.
+  const parentID = attachment.parentID;
+  if (!parentID)
+    throw new Error("cannot create a note under a standalone attachment");
   let note = existingKey
     ? (Zotero.Items.getByLibraryAndKey(attachment.libraryID, existingKey) as
         | Zotero.Item
         | false)
     : false;
+  let created = false;
   if (!note) {
     note = new Zotero.Item("note");
     note.libraryID = attachment.libraryID;
     note.parentID = parentID;
-    note.setNote(
-      `<div data-schema-version="9"><h1>${escapeHtml(c.title)}</h1></div>`,
-    );
+    note.setNote(wrapNoteHtml(`<h1>${escapeHtml(c.title)}</h1>`));
     await note.saveTx();
-  } else {
-    // Drop images from the previous version of this note.
-    for (const id of note.getAttachments()) {
-      const img = Zotero.Items.get(id) as Zotero.Item | false;
-      if (img) await img.eraseTx();
-    }
+    created = true;
   }
-  let body = `<h1>${escapeHtml(c.title)}</h1>`;
-  if (c.svg) {
-    const img = await Zotero.Attachments.importEmbeddedImage({
-      blob: new Blob([c.svg.markup], { type: "image/svg+xml" }),
-      parentItemID: note.id,
-    });
-    body += `<p><img data-attachment-key="${img.key}" width="${c.svg.width}" height="${c.svg.height}"/></p>`;
-  }
-  if (c.text) {
-    body += c.text
-      .split(/\n{2,}/)
-      .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
-      .join("");
-  }
-  note.setNote(`<div data-schema-version="9">${body}</div>`);
-  note.addTag(IMPORT_TAG);
-  await note.saveTx();
-  return note.key;
+  const saved = note;
+  // A half-built note we just created is not recorded in the state, so remove
+  // it; otherwise the retry on the next sync would duplicate it.
+  await eraseIfCreatedOnError(
+    created,
+    () => saved.eraseTx(),
+    async () => {
+      // Drawings the plugin put in the previous version of this note (SVGs the
+      // note embeds; images of any other kind are left alone). They are erased
+      // only after the new version is saved.
+      const svgs = svgAttachments(saved);
+      const stale = staleDrawingKeys(
+        saved.getNote(),
+        svgs.map((a) => a.key),
+      );
+      await importSaveThenErase<Zotero.Item>({
+        importImage: async () =>
+          c.svg ? await importSvg(saved, c.svg.markup) : undefined,
+        save: async (img) => {
+          let body = `<h1>${escapeHtml(c.title)}</h1>`;
+          if (c.svg && img) {
+            body += `<p>${drawingImg({ key: img.key, width: c.svg.width, height: c.svg.height })}</p>`;
+          }
+          if (c.text) {
+            body += c.text
+              .split(/\n{2,}/)
+              .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
+              .join("");
+          }
+          saved.setNote(wrapNoteHtml(body));
+          saved.addTag(IMPORT_TAG);
+          await saved.saveTx();
+        },
+        eraseImage: (img) => img.eraseTx(),
+        eraseOld: async () => {
+          for (const img of svgs) {
+            if (stale.includes(img.key)) await img.eraseTx();
+          }
+        },
+        onCleanupError: logCleanupError,
+      });
+    },
+    logCleanupError,
+  );
+  return saved.key;
 }
 
 export async function eraseByKey(libraryID: number, key: string) {
@@ -235,11 +267,16 @@ export function existsByKey(libraryID: number, key: string) {
   return !!item && !item.deleted;
 }
 
-/** Live (not trashed) child notes of the attachment's parent item. */
-export function childNotes(attachment: Zotero.Item): Zotero.Item[] {
+/** Child notes of the attachment's parent item, including trashed ones. */
+export function childNotesWithTrashed(attachment: Zotero.Item): Zotero.Item[] {
   const parent = attachment.parentItem;
   if (!parent) return [];
-  return Zotero.Items.get(parent.getNotes()).filter((n) => !n.deleted);
+  return Zotero.Items.get(parent.getNotes(true));
+}
+
+/** Whether an item with this key still exists in the library (any parent). */
+export function existsInLibrary(libraryID: number, key: string): boolean {
+  return !!Zotero.Items.getByLibraryAndKey(libraryID, key);
 }
 
 /** Move an item to Zotero's trash (recoverable). */
@@ -253,17 +290,50 @@ export async function trashByKey(libraryID: number, key: string) {
   }
 }
 
+/** Store SVG markup as an embedded image attachment of the note. */
+function importSvg(note: Zotero.Item, markup: string) {
+  return Zotero.Attachments.importEmbeddedImage({
+    blob: new Blob([markup], { type: "image/svg+xml" }),
+    parentItemID: note.id,
+  });
+}
+
+/** Embedded SVG attachments of a note (the plugin only ever makes SVGs). */
+function svgAttachments(note: Zotero.Item): Zotero.Item[] {
+  return (Zotero.Items.get(note.getAttachments()) as Zotero.Item[]).filter(
+    (a) => a.attachmentContentType === "image/svg+xml",
+  );
+}
+
+export interface SyncedNoteOptions {
+  /**
+   * Regenerate the whole body from `body`. Only for text that really has to
+   * change; otherwise just the drawing is swapped and the rest is kept.
+   */
+  rewriteBody: boolean;
+  /** Attachment key of the drawing the plugin created last time. */
+  drawingKey?: string;
+  /**
+   * Records from before `drawingKey` existed: replace the img of the note's
+   * single embedded SVG attachment with the new drawing. That attachment is
+   * left in place (it may be user content); only `drawingKey` is erased.
+   */
+  adoptLegacyDrawing?: boolean;
+}
+
 /**
  * Create or rewrite a note paired with a tablet page: title, body, and the
- * page's handwriting as an embedded SVG drawing.
+ * page's handwriting as an embedded SVG drawing. Only the plugin's own drawing
+ * attachment is erased, and the body is regenerated only when asked to.
  */
 export async function writeSyncedNote(
   attachment: Zotero.Item,
   key: string | undefined,
   title: string,
   body: RmParagraph[],
-  drawing?: { markup: string; width: number; height: number },
-): Promise<string> {
+  drawing: { markup: string; width: number; height: number } | undefined,
+  opts: SyncedNoteOptions,
+): Promise<{ key: string; drawingKey?: string }> {
   const parentID = attachment.parentID;
   if (!parentID) throw new Error("Notes need a parent item");
   let note = key
@@ -271,6 +341,8 @@ export async function writeSyncedNote(
         | Zotero.Item
         | false)
     : false;
+  let rewriteBody = opts.rewriteBody;
+  let created = false;
   if (!note) {
     note = new Zotero.Item("note");
     note.libraryID = attachment.libraryID;
@@ -278,21 +350,56 @@ export async function writeSyncedNote(
     note.setNote(paragraphsToHtml(title, body));
     note.addTag(IMPORT_TAG);
     await note.saveTx();
+    created = true;
+    rewriteBody = true;
   }
-  // Replace the previous drawing, if any.
-  for (const id of note.getAttachments()) {
-    const img = Zotero.Items.get(id) as Zotero.Item | false;
-    if (img) await img.eraseTx();
-  }
-  let image: { key: string; width: number; height: number } | undefined;
-  if (drawing) {
-    const img = await Zotero.Attachments.importEmbeddedImage({
-      blob: new Blob([drawing.markup], { type: "image/svg+xml" }),
-      parentItemID: note.id,
-    });
-    image = { key: img.key, width: drawing.width, height: drawing.height };
-  }
-  note.setNote(paragraphsToHtml(title, body, image));
-  await note.saveTx();
-  return note.key;
+  const saved = note;
+  // A note created here is not in the state yet, so any failure below would
+  // leave an orphan that the next sync duplicates (and pushes as a blank page).
+  return eraseIfCreatedOnError(
+    created,
+    () => saved.eraseTx(),
+    async () => {
+      // Only a key the plugin recorded may be erased. A legacy record only
+      // tells us which img to replace; its attachment stays where it is.
+      const oldKey = opts.drawingKey;
+      const patchKey =
+        oldKey ??
+        (opts.adoptLegacyDrawing
+          ? legacyDrawingKey(
+              saved.getNote(),
+              svgAttachments(saved).map((a) => a.key),
+            )
+          : undefined);
+      let image: NoteDrawing | undefined;
+      await importSaveThenErase<Zotero.Item>({
+        importImage: async () =>
+          drawing ? await importSvg(saved, drawing.markup) : undefined,
+        save: async (img) => {
+          image =
+            drawing && img
+              ? { key: img.key, width: drawing.width, height: drawing.height }
+              : undefined;
+          saved.setNote(
+            rewriteBody
+              ? paragraphsToHtml(title, body, image)
+              : patchDrawing(saved.getNote(), patchKey, image),
+          );
+          await saved.saveTx();
+        },
+        // The new image is not referenced by anything yet.
+        eraseImage: (img) => img.eraseTx(),
+        // The previous drawing is unreferenced now; erase just that attachment.
+        eraseOld: async () => {
+          if (oldKey && oldKey !== image?.key) {
+            const old = svgAttachments(saved).find((a) => a.key === oldKey);
+            if (old) await old.eraseTx();
+          }
+        },
+        onCleanupError: logCleanupError,
+      });
+      return { key: saved.key, drawingKey: image?.key };
+    },
+    logCleanupError,
+  );
 }

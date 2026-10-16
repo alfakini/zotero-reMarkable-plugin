@@ -14,7 +14,7 @@ import {
   type IndexEntry,
 } from "../remarkable/cloud";
 import { pageRefs } from "../remarkable/content";
-import { parseRm, type RmPage } from "../remarkable/rmscene";
+import { parseRm } from "../remarkable/rmscene";
 import {
   CONVERTER_VERSION,
   convertPages,
@@ -27,6 +27,15 @@ import {
   syncNotes,
 } from "./noteSync";
 import { buildRemarkablePdf } from "./pdfExport";
+import {
+  canSaveCandidate,
+  type CandidateFailure,
+  formatCandidateFailures,
+  keysToErase,
+  needsPull,
+  nextRmDocHash,
+  readPages,
+} from "./pullPlan";
 import type { SyncStateStore, DocState } from "./state";
 import {
   eraseByKey,
@@ -132,10 +141,7 @@ export class SyncEngine {
         // older versions imported one-way from notebook pages.
         if (doc && att.parentID) migrateImportedPageNotes(doc);
         const tabletChanged =
-          !!doc &&
-          !!entry &&
-          (doc.rmDocHash !== entry.hash ||
-            doc.converterVersion !== CONVERTER_VERSION);
+          !!doc && !!entry && needsPull(doc, entry.hash, CONVERTER_VERSION);
         if (doc && entry && tabletChanged) {
           await this.pull(att, doc, entry, report);
         }
@@ -149,7 +155,9 @@ export class SyncEngine {
           if (tabletChanged || notesPrint !== doc.notesFingerprint) {
             const r = await syncNotes(this.cloud, att, doc, this.authorId);
             report.notes += r.toTablet + r.toZotero + r.created + r.removed;
-            if (r.newHash) doc.rmDocHash = r.newHash;
+            if (r.changed) {
+              doc.rmDocHash = nextRmDocHash(doc.rmDocHash, r.changed);
+            }
             doc.notesFingerprint = notesFingerprint(att, doc);
             this.state.set(doc);
           }
@@ -204,7 +212,14 @@ export class SyncEngine {
     });
     const pageCount = built.originalPageCount + built.appendedPageCount;
     if (doc && doc.originalPageCount === built.originalPageCount) {
-      await this.cloud.replacePdf(doc.rmDocId, built.bytes, pageCount);
+      const replaced = await this.cloud.replacePdf(
+        doc.rmDocId,
+        built.bytes,
+        pageCount,
+      );
+      // Only advance the recorded hash when the tablet did not change the
+      // document since we last pulled it; otherwise the next sync pulls first.
+      doc.rmDocHash = nextRmDocHash(doc.rmDocHash, replaced);
       report.updated++;
     } else {
       if (doc) await this.cloud.trashDocument(doc.rmDocId);
@@ -224,12 +239,12 @@ export class SyncEngine {
         imported: {},
       };
       report.uploaded++;
+      doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
     }
     doc.appendedPageCount = built.appendedPageCount;
     doc.pageBoxes = built.pageBoxes;
     doc.uploadedFingerprint = print;
     doc.lastError = undefined;
-    doc.rmDocHash = (await this.cloud.findDocument(doc.rmDocId))?.hash;
     doc.lastSync = new Date().toISOString();
     this.state.set(doc);
   }
@@ -242,19 +257,18 @@ export class SyncEngine {
   ) {
     const files = await this.cloud.getDocumentFiles(doc.rmDocId, entry);
     if (!files) return;
-    const pages: { ref: ReturnType<typeof pageRefs>[number]; page: RmPage }[] =
-      [];
-    for (const ref of pageRefs(files.content)) {
-      const data = files.rm.get(ref.id);
-      if (!data) continue;
-      try {
-        pages.push({ ref, page: parseRm(data) });
-      } catch (e) {
+    // Pages whose .rm exists but fails to parse: their imported objects must
+    // not be erased. A page without an .rm blob is empty (the files come from
+    // the document index), so its imported objects are erased.
+    const { pages, unreadable } = readPages(
+      pageRefs(files.content),
+      files.rm,
+      parseRm,
+      (ref, e) =>
         Zotero.debug(
           `[reMarkable] skipping page ${ref.id}: ${(e as Error).message}`,
-        );
-      }
-    }
+        ),
+    );
     let candidates = convertPages({
       pages,
       originalPageCount: doc.originalPageCount,
@@ -275,7 +289,8 @@ export class SyncEngine {
         }
       }
     }
-    if (!this.settings().importHandwriting) {
+    const importHandwriting = this.settings().importHandwriting;
+    if (!importHandwriting) {
       candidates = candidates.filter(
         (c) => c.kind === "annotation" && c.json.type !== "ink",
       );
@@ -283,25 +298,54 @@ export class SyncEngine {
 
     const seen = new Set<string>();
     let savedImages = false;
+    // Each candidate is saved in isolation: one that cannot be saved is
+    // recorded and retried on the next sync without blocking the others.
+    const failures: CandidateFailure[] = [];
     for (const c of candidates) {
+      // Always "seen", so a skipped or failed one never erases an old import.
       seen.add(c.rmKey);
+      if (!canSaveCandidate(c.kind, !!att.parentID)) {
+        Zotero.debug(
+          `[reMarkable] skipping note ${c.rmKey}: standalone attachment has no parent item`,
+        );
+        continue;
+      }
       const rec = doc.imported[c.rmKey];
       if (rec) {
         // Unchanged, or deleted by the user in Zotero: leave it alone.
         if (rec.hash === c.hash || !existsByKey(att.libraryID, rec.zoteroKey))
           continue;
       }
-      const key =
-        c.kind === "annotation"
-          ? await saveAnnotation(att, c, rec?.zoteroKey)
-          : await saveNote(att, c, rec?.zoteroKey);
-      doc.imported[c.rmKey] = { zoteroKey: key, hash: c.hash, kind: c.kind };
-      if (c.kind === "annotation" && c.json.type === "ink") savedImages = true;
-      report.imported++;
+      try {
+        const key =
+          c.kind === "annotation"
+            ? await saveAnnotation(att, c, rec?.zoteroKey)
+            : await saveNote(att, c, rec?.zoteroKey);
+        doc.imported[c.rmKey] = { zoteroKey: key, hash: c.hash, kind: c.kind };
+        if (c.kind === "annotation" && c.json.type === "ink")
+          savedImages = true;
+        report.imported++;
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        Zotero.debug(
+          `[reMarkable] could not import ${c.rmKey}: ${e}\n${(e as Error)?.stack}`,
+        );
+        failures.push({ rmKey: c.rmKey, message });
+      }
+    }
+    if (failures.length) {
+      report.errors.push(
+        `${remarkableTitle(att)}: ${formatCandidateFailures(failures, candidates.length)}`,
+      );
     }
     // Erased on the tablet -> remove what we imported from it.
-    for (const [rmKey, rec] of Object.entries(doc.imported)) {
-      if (seen.has(rmKey)) continue;
+    for (const rmKey of keysToErase(
+      doc.imported,
+      seen,
+      unreadable,
+      importHandwriting,
+    )) {
+      const rec = doc.imported[rmKey];
       await eraseByKey(att.libraryID, rec.zoteroKey);
       delete doc.imported[rmKey];
       report.removed++;
@@ -316,6 +360,9 @@ export class SyncEngine {
         Zotero.debug(`[reMarkable] preview render failed: ${e}`);
       }
     }
+    // Unsaved candidates are retried on the next sync (see needsPull); the
+    // saved ones are skipped by hash, so only the failed ones are redone.
+    doc.pullIncomplete = failures.length > 0 || undefined;
     doc.rmDocHash = entry.hash;
     doc.converterVersion = CONVERTER_VERSION;
     doc.lastSync = new Date().toISOString();
