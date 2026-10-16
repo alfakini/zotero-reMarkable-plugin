@@ -80,7 +80,7 @@ export async function buildRemarkablePdf(
   let appendedPageCount = 0;
   if (options.appendNotesPages && (numbered.length || notes.length)) {
     const size = pages[0]?.getSize() ?? { width: 612, height: 792 };
-    const writer = new PageWriter(doc, size.width, size.height, font, bold);
+    const writer = new PageWriter(doc, size.width, size.height, bold);
     writer.heading(
       options.title ? `Zotero notes — ${options.title}` : "Zotero notes",
     );
@@ -282,7 +282,6 @@ class PageWriter {
     private doc: PDFDocument,
     private width: number,
     private height: number,
-    private font: PDFFont,
     private bold: PDFFont,
   ) {
     this.margin = Math.max(36, width * 0.08);
@@ -295,46 +294,27 @@ class PageWriter {
     this.pageCount++;
   }
 
-  private line(
-    text: string,
-    font: PDFFont,
-    size: number,
-    color = rgb(0, 0, 0),
-  ) {
-    if (this.y - size < this.margin) this.newPage();
-    this.y -= size * 1.3;
-    this.page.drawText(text, { x: this.margin, y: this.y, size, font, color });
+  /** Wrap `text` to the column and flow it onto the page(s) in `font`. */
+  private block(text: string, font: PDFFont, size: number) {
+    const column = this.width - 2 * this.margin;
+    for (const line of wrap(sanitize(text, font), font, size, column)) {
+      if (this.y - size < this.margin) this.newPage();
+      this.y -= size * 1.3;
+      this.page.drawText(line, { x: this.margin, y: this.y, size, font });
+    }
   }
 
   heading(text: string) {
-    for (const l of wrap(
-      sanitize(text, this.bold),
-      this.bold,
-      16,
-      this.width - 2 * this.margin,
-    ))
-      this.line(l, this.bold, 16);
+    this.block(text, this.bold, 16);
     this.gap();
   }
 
   subheading(text: string) {
-    for (const l of wrap(
-      sanitize(text, this.bold),
-      this.bold,
-      13,
-      this.width - 2 * this.margin,
-    ))
-      this.line(l, this.bold, 13);
+    this.block(text, this.bold, 13);
   }
 
-  paragraph(text: string, font: PDFFont, color = rgb(0, 0, 0)) {
-    for (const l of wrap(
-      sanitize(text, font),
-      font,
-      this.size,
-      this.width - 2 * this.margin,
-    ))
-      this.line(l, font, this.size, font === this.font ? rgb(0, 0, 0) : color);
+  paragraph(text: string, font: PDFFont) {
+    this.block(text, font, this.size);
   }
 
   gap() {

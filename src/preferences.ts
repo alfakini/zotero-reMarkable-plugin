@@ -1,8 +1,8 @@
 /** Behaviour of the preferences pane (pairing with the reMarkable cloud). */
-import { config } from "../../package.json";
-import { CONNECT_URL } from "../remarkable/cloud";
-import { t } from "../l10n";
-import { plugin } from "../plugin";
+import { config } from "../package.json";
+import { t } from "./l10n";
+import { plugin } from "./plugin";
+import { CONNECT_URL } from "./remarkable/cloud";
 
 const PREFIX = `zotero-prefpane-${config.addonRef}-`;
 

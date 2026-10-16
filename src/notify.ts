@@ -8,22 +8,24 @@ export interface ProgressPopup {
   finish(text: string, failed: boolean, details?: string[]): void;
 }
 
-export function notify(text: string, failed = false) {
+/** A shown progress window with one line, and that line. */
+function open(text: string, percent: number) {
   const win = new Zotero.ProgressWindow({ closeOnClick: true });
   win.changeHeadline(config.addonName, ICON);
   const line = new win.ItemProgress(ICON, text);
-  line.setProgress(100);
-  if (failed) line.setError();
+  line.setProgress(percent);
   win.show();
+  return { win, line };
+}
+
+export function notify(text: string, failed = false) {
+  const { win, line } = open(text, 100);
+  if (failed) line.setError();
   win.startCloseTimer(5000);
 }
 
 export function progress(text: string): ProgressPopup {
-  const win = new Zotero.ProgressWindow({ closeOnClick: true });
-  win.changeHeadline(config.addonName, ICON);
-  const line = new win.ItemProgress(ICON, text);
-  line.setProgress(0);
-  win.show();
+  const { win, line } = open(text, 0);
   return {
     update(text, percent) {
       line.setText(text);
