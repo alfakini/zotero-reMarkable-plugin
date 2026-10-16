@@ -553,7 +553,7 @@ async function respaceHighlights(att: Zotero.Item, candidates: Candidate[]) {
 }
 
 /** One report line for the candidates that could not be saved; lists at most three. */
-function formatFailures(failures: string[], total: number): string {
+export function formatFailures(failures: string[], total: number): string {
   const shown = failures.slice(0, 3).join("; ");
   const more = failures.length > 3 ? `; and ${failures.length - 3} more` : "";
   return `could not import ${failures.length} of ${total} items (${shown}${more}); will retry on the next sync`;

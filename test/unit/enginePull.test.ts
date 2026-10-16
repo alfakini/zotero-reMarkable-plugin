@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { CONVERTER_VERSION } from "../../src/sync/convert";
-import { keysToErase, needsPull, nextRmDocHash } from "../../src/sync/engine";
+import {
+  formatFailures,
+  keysToErase,
+  needsPull,
+  nextRmDocHash,
+} from "../../src/sync/engine";
 import {
   FakeTablet,
   fakeAttachment,
@@ -57,6 +62,17 @@ test("does not match page ids that merely share a prefix", () => {
     true,
   );
   assert.deepEqual(out, ["p10/g/x"]);
+});
+
+test("formats and truncates candidate failures", () => {
+  const f = Array.from({ length: 5 }, (_, i) => `p${i}/i/x: boom ${i}`);
+  const text = formatFailures(f, 12);
+  assert.match(text, /could not import 5 of 12 items/);
+  assert.match(text, /p0\/i\/x: boom 0/);
+  assert.match(text, /p2\/i\/x: boom 2/);
+  assert.doesNotMatch(text, /p3\/i\/x/);
+  assert.match(text, /and 2 more/);
+  assert.doesNotMatch(formatFailures(f.slice(0, 1), 1), /more/);
 });
 
 test("pull is needed when the previous pull was incomplete", () => {
