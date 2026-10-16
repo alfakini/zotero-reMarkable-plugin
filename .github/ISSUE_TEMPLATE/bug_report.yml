@@ -1,0 +1,49 @@
+name: Bug report
+description: Something doesn't sync or behaves wrongly
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Tag an item `reMarkable` and sync
+        2. Highlight text on the tablet
+        3. Sync again
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: input
+    id: zotero-version
+    attributes:
+      label: Zotero version and OS
+      placeholder: "Zotero 10.0.6, macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: reMarkable device and software version
+      placeholder: "Paper Pro, 3.22"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error messages or logs
+      description: >
+        From the sync popup, Tools → Developer → Error Console, or the
+        `lastError` field in `<Zotero data dir>/remarkable-sync/state.json`.
+        Remove any tokens before posting.
+      render: text
