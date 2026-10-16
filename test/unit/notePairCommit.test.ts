@@ -4,13 +4,8 @@ import {
   ParagraphStyle as S,
   type RmParagraph,
 } from "../../src/remarkable/rmscene";
-import {
-  applyPairPlan,
-  decide,
-  plainText,
-  planPair,
-  TabletCommits,
-} from "../../src/sync/notes";
+import { plainText } from "../../src/sync/notes";
+import { applyPairPlan, decide, planPair } from "../../src/sync/noteSync";
 import type { NotePageRecord } from "../../src/sync/state";
 
 const para = (text: string) => ({ style: S.PLAIN, text });
@@ -60,7 +55,7 @@ function makeWorld(kinds: [Kind, Kind], drawing: boolean) {
       const boom = (at: FailAt) => {
         if (failAt === at) throw new Error(`injected ${at}`);
       };
-      const commits = new TabletCommits();
+      const commits: (() => void)[] = [];
       const writes = new Map<string, RmParagraph[]>();
       const newPages = new Map<string, RmParagraph[]>();
       let n = 0;
@@ -103,7 +98,7 @@ function makeWorld(kinds: [Kind, Kind], drawing: boolean) {
           boom("step3");
           const body = world.newZoteroNote;
           newPages.set("P4", body);
-          commits.defer(() => {
+          commits.push(() => {
             world.pairs.P4.recorded = true;
             world.pairs.P4.rec = { noteKey: "N4", base: plainText(body) };
           });
@@ -122,7 +117,7 @@ function makeWorld(kinds: [Kind, Kind], drawing: boolean) {
           world.tabletWrites++;
           world.newZoteroNote = undefined;
         }
-        commits.commit();
+        for (const f of commits.splice(0)) f();
       };
       return run();
     },
@@ -217,7 +212,7 @@ test("a Zotero write that throws leaves the record untouched", async () => {
   const rec: NotePageRecord = { noteKey: "N", base: "a" };
   const plan = planPair(rec.base, [para("a")], [para("b")]);
   assert.equal(plan.action, "toZotero");
-  const commits = new TabletCommits();
+  const commits: (() => void)[] = [];
   await assert.rejects(
     applyPairPlan(
       rec,
@@ -227,13 +222,13 @@ test("a Zotero write that throws leaves the record untouched", async () => {
     ),
   );
   assert.equal(rec.base, "a");
-  commits.commit();
+  for (const f of commits.splice(0)) f();
   assert.equal(rec.base, "a");
 });
 
 test("a failed tablet write keeps the old base for toTablet and the tablet text for conflict", async () => {
   const toTablet: NotePageRecord = { noteKey: "N", base: "a" };
-  const c1 = new TabletCommits();
+  const c1: (() => void)[] = [];
   await applyPairPlan(
     toTablet,
     planPair("a", [para("z")], [para("a")]),
@@ -241,11 +236,11 @@ test("a failed tablet write keeps the old base for toTablet and the tablet text 
     c1,
   );
   assert.equal(toTablet.base, "a"); // not "z" until the tablet write is done
-  c1.commit();
+  for (const f of c1.splice(0)) f();
   assert.equal(toTablet.base, "z");
 
   const conflict: NotePageRecord = { noteKey: "N", base: "a" };
-  const c2 = new TabletCommits();
+  const c2: (() => void)[] = [];
   const plan = planPair("a", [para("z")], [para("t")]);
   await applyPairPlan(conflict, plan, async () => {}, c2);
   // Zotero holds the merged text, the tablet still "t": the retry is a push.
@@ -254,6 +249,6 @@ test("a failed tablet write keeps the old base for toTablet and the tablet text 
     decide(conflict.base, plainText(plan.zoteroBody!), "t"),
     "toTablet",
   );
-  c2.commit();
+  for (const f of c2.splice(0)) f();
   assert.equal(conflict.base, plainText(plan.zoteroBody!));
 });

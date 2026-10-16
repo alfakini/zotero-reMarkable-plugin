@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildDetachedList, skipKeys } from "../../src/sync/detached";
 import {
   type DocState,
   type StateFileIO,
   SyncStateStore,
+  buildDetachedList,
 } from "../../src/sync/state";
 
 const PATH = "/data/remarkable-sync/state.json";
@@ -307,7 +307,7 @@ test("a pending upload forgotten before a failing push keeps its keys excluded",
   await second.load();
   assert.equal(second.get(1, "AAAA"), undefined);
   const registry = second.getDetached(1, "AAAA");
-  const skip = skipKeys(second.get(1, "AAAA"), registry);
+  const skip = new Set(buildDetachedList(second.get(1, "AAAA"), registry));
   for (const k of ["ANNOA", "NOTEB", "OLD1"]) assert.ok(skip.has(k));
   assert.equal(skip.has("USERKEY"), false);
   // The next successful push derives the new document's detached list from
@@ -499,4 +499,47 @@ test("a skipped save leaves the backup at the pre-session state", async () => {
   // The backup is refreshed once per load: it still holds the pre-session text.
   assert.equal(io.files.get(`${PATH}.bak`), before);
   assert.ok(JSON.parse(io.files.get(PATH)!).docs["1/NEW"]);
+});
+
+const imported = {
+  "p1/g/a": { zoteroKey: "ANNOA", hash: "h", kind: "annotation" as const },
+  "p1/margin": { zoteroKey: "NOTEB", hash: "h", kind: "note" as const },
+  "p2/i/c": { zoteroKey: "ANNOC", hash: "h", kind: "annotation" as const },
+};
+
+test("the detached list covers imported, previously detached and registry keys", () => {
+  assert.deepEqual(buildDetachedList({ imported }).sort(), [
+    "ANNOA",
+    "ANNOC",
+    "NOTEB",
+  ]);
+  // Earlier replacements and the registry are kept, without duplicates.
+  const out = buildDetachedList(
+    {
+      imported: { "p1/g/a": imported["p1/g/a"] },
+      detachedImported: ["OLD1", "ANNOA"],
+    },
+    ["REG1", "ANNOA"],
+  );
+  assert.deepEqual(out.sort(), ["ANNOA", "OLD1", "REG1"]);
+  assert.equal(out.includes("USERKEY"), false);
+});
+
+test("the detached list of an untracked document is only the registry", () => {
+  assert.deepEqual(buildDetachedList(undefined), []);
+  assert.deepEqual(buildDetachedList({ imported: {} }), []);
+  assert.deepEqual(buildDetachedList(undefined, ["REG1", "REG2"]).sort(), [
+    "REG1",
+    "REG2",
+  ]);
+});
+
+test("after a replacement the new document keeps the old imports out of the PDF", () => {
+  const next = {
+    imported: {},
+    detachedImported: buildDetachedList({ imported }),
+  };
+  const skip = new Set(buildDetachedList(next));
+  for (const k of ["ANNOA", "NOTEB", "ANNOC"]) assert.ok(skip.has(k));
+  assert.equal(skip.has("USERKEY"), false);
 });

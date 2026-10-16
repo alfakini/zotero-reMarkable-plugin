@@ -9,46 +9,39 @@
  *   3. notes: two-way sync of "reMarkable Note …" notes with their pages.
  */
 import {
+  type ChangedDocument,
+  type IndexEntry,
+  isTopLevelFolder,
   type RemarkableCloud,
   RemarkableError,
-  type IndexEntry,
 } from "../remarkable/cloud";
-import { pageRefs } from "../remarkable/content";
+import { pageRefs, type RmPageRef } from "../remarkable/content";
 import { uuid4 } from "../remarkable/hash";
-import { parseRm } from "../remarkable/rmscene";
+import { parseRm, type RmPage } from "../remarkable/rmscene";
 import {
-  CONVERTER_VERSION,
-  type PageIndex,
+  type AnnotationCandidate,
   buildPageIndex,
+  type Candidate,
+  CONVERTER_VERSION,
   convertPages,
   fingerprint,
+  type PageIndex,
   respaceWith,
   splitPageTexts,
 } from "./convert";
-import { resolveFolderId } from "./folderCache";
-import { LARGE_PDF_BYTES, largePdfWarning } from "./largePdf";
 import { Mutex } from "./mutex";
-import { titleToPush } from "./titlePush";
 import {
   migrateImportedPageNotes,
   notesFingerprint,
   syncNotes,
 } from "./noteSync";
-import { buildDetachedList, clearErased } from "./detached";
 import { buildRemarkablePdf } from "./pdfExport";
 import {
-  canSaveCandidate,
-  type CandidateFailure,
-  formatCandidateFailures,
-  invalidatedRecord,
-  isRecordCurrent,
-  keysToErase,
-  needsPull,
-  newUploadedDoc,
-  nextRmDocHash,
-  readPages,
-} from "./pullPlan";
-import type { SyncStateStore, DocState } from "./state";
+  buildDetachedList,
+  type DocState,
+  type ImportedRecord,
+  type SyncStateStore,
+} from "./state";
 import {
   eraseByKey,
   existsByKey,
@@ -77,6 +70,16 @@ export interface SyncReport {
 }
 
 export type Progress = (text: string, fraction?: number) => void;
+
+/**
+ * pdf-lib parses and re-serialises the whole file synchronously on Zotero's
+ * main thread, so rebuilding a PDF at least this big may briefly freeze the
+ * UI. This only warns; it never changes which PDFs are synced.
+ */
+const LARGE_PDF_BYTES = 50 * 1024 * 1024;
+
+const errorMessage = (e: unknown) =>
+  e instanceof Error ? e.message : String(e);
 
 export class SyncEngine {
   constructor(
@@ -168,16 +171,10 @@ export class SyncEngine {
           await this.pull(att, doc, entry, report);
         }
         folderId ??= await resolveFolderId(
+          this.cloud,
           this.state,
           this.settings().folder,
           rootEntries,
-          (name) => this.cloud.ensureFolder(name),
-          (id) => {
-            const entry = rootEntries.get(id);
-            return entry
-              ? this.cloud.readMetadata(entry)
-              : Promise.resolve(undefined);
-          },
         );
         await this.push(
           att,
@@ -206,10 +203,10 @@ export class SyncEngine {
         Zotero.debug(
           `[reMarkable] sync failed for ${label}: ${err}\n${err?.stack}`,
         );
-        report.errors.push(`${label}: ${err?.message ?? String(e)}`);
+        report.errors.push(`${label}: ${errorMessage(e)}`);
         const failed = this.state.get(att.libraryID, att.key);
         if (failed) {
-          failed.lastError = `${new Date().toISOString()} ${err?.message ?? e}\n${err?.stack ?? ""}`;
+          failed.lastError = `${new Date().toISOString()} ${errorMessage(e)}\n${err?.stack ?? ""}`;
           this.state.set(failed);
         }
         if (e instanceof RemarkableError && e.status === 401) break;
@@ -264,7 +261,8 @@ export class SyncEngine {
     }
 
     if (stat.size !== undefined && stat.size >= LARGE_PDF_BYTES) {
-      const warning = largePdfWarning(title, stat.size);
+      const mb = Math.round(stat.size / (1024 * 1024));
+      const warning = `${title}: rebuilding a large PDF (${mb} MB), Zotero may freeze briefly`;
       // Keep the caller's fraction so the progress bar does not reset.
       progress(warning, fraction);
       Zotero.debug(`[reMarkable] ${warning}`);
@@ -272,8 +270,6 @@ export class SyncEngine {
 
     // Copy into this realm: typed arrays from privileged APIs fail
     // `instanceof Uint8Array` checks inside the plugin sandbox (pdf-lib).
-    // This realm copy is needed, so it is kept; nothing else here copies the
-    // bytes before pdf-lib loads them.
     const pdf = new Uint8Array(await IOUtils.read(path));
     const built = await buildRemarkablePdf(pdf, annotations, notes, {
       appendNotesPages: this.settings().appendNotesPages,
@@ -309,20 +305,22 @@ export class SyncEngine {
       // finds no entry (forgets it and uploads again) or adopts the entry; its
       // missing fingerprint then makes push replace the PDF.
       const rmDocId = uuid4();
-      doc = newUploadedDoc(
-        {
-          attachmentKey: att.key,
-          libraryID: att.libraryID,
-          rmDocId,
-          originalPageCount: built.originalPageCount,
-          appendedPageCount: built.appendedPageCount,
-          pageBoxes: built.pageBoxes,
-          detachedImported: detachedImported.length
-            ? detachedImported
-            : undefined,
-        },
-        CONVERTER_VERSION,
-      );
+      doc = {
+        attachmentKey: att.key,
+        libraryID: att.libraryID,
+        rmDocId,
+        originalPageCount: built.originalPageCount,
+        appendedPageCount: built.appendedPageCount,
+        pageBoxes: built.pageBoxes,
+        detachedImported: detachedImported.length
+          ? detachedImported
+          : undefined,
+        // Nothing is imported yet, so start at the current converter version;
+        // otherwise the next sync would see a version mismatch (needsPull)
+        // and download every page for nothing.
+        converterVersion: CONVERTER_VERSION,
+        imported: {},
+      };
       this.state.set(doc);
       await this.state.save();
       const uploaded = await this.cloud.uploadPdf(
@@ -352,18 +350,23 @@ export class SyncEngine {
   ) {
     const files = await this.cloud.getDocumentFiles(doc.rmDocId, entry);
     if (!files) return;
-    // Pages whose .rm exists but fails to parse: their imported objects must
-    // not be erased. A page without an .rm blob is empty (the files come from
-    // the document index), so its imported objects are erased.
-    const { pages, unreadable } = readPages(
-      pageRefs(files.content),
-      files.rm,
-      parseRm,
-      (ref, e) =>
+    // The page list comes from the document index: a page without an .rm
+    // blob is empty, so its imported objects are erased below. A blob that
+    // exists but fails to parse is unreadable and keeps them.
+    const pages: { ref: RmPageRef; page: RmPage }[] = [];
+    const unreadable = new Set<string>();
+    for (const ref of pageRefs(files.content)) {
+      const data = files.rm.get(ref.id);
+      if (!data) continue;
+      try {
+        pages.push({ ref, page: parseRm(data) });
+      } catch (e) {
+        unreadable.add(ref.id);
         Zotero.debug(
-          `[reMarkable] skipping page ${ref.id}: ${(e as Error).message}`,
-        ),
-    );
+          `[reMarkable] skipping page ${ref.id}: ${errorMessage(e)}`,
+        );
+      }
+    }
     let candidates = convertPages({
       pages,
       originalPageCount: doc.originalPageCount,
@@ -372,24 +375,7 @@ export class SyncEngine {
       // Notebook pages pair with notes (noteSync) when the item can hold notes.
       skipInsertedPages: !!att.parentID,
     });
-    // Restore word spacing in highlighted text from Zotero's text extraction.
-    if (candidates.some((c) => c.kind === "annotation" && c.json.text)) {
-      const pageTexts = await pageTextsOf(att);
-      // Built lazily and shared by all highlights on the same page.
-      const indexes = new Map<number, PageIndex>();
-      for (const c of candidates) {
-        if (c.kind === "annotation" && c.json.text) {
-          const pageIndex = c.json.position.pageIndex;
-          const pageText = pageTexts[pageIndex];
-          let index = indexes.get(pageIndex);
-          if (!index && pageText) {
-            index = buildPageIndex(pageText);
-            indexes.set(pageIndex, index);
-          }
-          c.json.text = respaceWith(c.json.text, pageText, index);
-        }
-      }
-    }
+    await respaceHighlights(att, candidates);
     const importHandwriting = this.settings().importHandwriting;
     if (!importHandwriting) {
       candidates = candidates.filter(
@@ -401,31 +387,27 @@ export class SyncEngine {
     let savedImages = false;
     // Each candidate is saved in isolation: one that cannot be saved is
     // recorded and retried on the next sync without blocking the others.
-    const failures: CandidateFailure[] = [];
+    const failures: string[] = [];
     for (const c of candidates) {
       // Always "seen", so a skipped or failed one never erases an old import.
       seen.add(c.rmKey);
-      if (!canSaveCandidate(c.kind, !!att.parentID)) {
+      if (c.kind === "note" && !att.parentID) {
+        // Child notes need a regular parent item.
         Zotero.debug(
           `[reMarkable] skipping note ${c.rmKey}: standalone attachment has no parent item`,
         );
         continue;
       }
       const rec = doc.imported[c.rmKey];
-      if (rec) {
-        // Unchanged since the current converter imported it, or deleted by
-        // the user in Zotero: leave it alone.
-        if (
-          isRecordCurrent(
-            rec,
-            c.hash,
-            doc.converterVersion,
-            CONVERTER_VERSION,
-          ) ||
-          !existsByKey(att.libraryID, rec.zoteroKey)
-        )
-          continue;
-      }
+      // Leave it alone when unchanged since the current converter imported it
+      // (the candidate hash covers only the raw conversion, so a record from
+      // an older converter is re-imported once), or when the user deleted it.
+      if (
+        rec &&
+        ((rec.hash === c.hash && doc.converterVersion === CONVERTER_VERSION) ||
+          !existsByKey(att.libraryID, rec.zoteroKey))
+      )
+        continue;
       try {
         const key =
           c.kind === "annotation"
@@ -436,19 +418,19 @@ export class SyncEngine {
           savedImages = true;
         report.imported++;
       } catch (e) {
-        const message = (e as Error)?.message ?? String(e);
         Zotero.debug(
           `[reMarkable] could not import ${c.rmKey}: ${e}\n${(e as Error)?.stack}`,
         );
-        failures.push({ rmKey: c.rmKey, message });
-        // The document moves to the current converter version below, so keep
-        // a failed re-import of an old record from looking current.
-        if (rec) doc.imported[c.rmKey] = invalidatedRecord(rec);
+        failures.push(`${c.rmKey}: ${errorMessage(e)}`);
+        // The document moves to the current converter version below. An
+        // empty hash matches no candidate, so the failed re-import is retried
+        // instead of looking current again.
+        if (rec) doc.imported[c.rmKey] = { ...rec, hash: "" };
       }
     }
     if (failures.length) {
       report.errors.push(
-        `${remarkableTitle(att)}: ${formatCandidateFailures(failures, candidates.length)}`,
+        `${remarkableTitle(att)}: ${formatFailures(failures, candidates.length)}`,
       );
     }
     // Erased on the tablet -> remove what we imported from it.
@@ -523,8 +505,13 @@ export class SyncEngine {
       }
       this.state.removeDetached(att.libraryID, att.key, keys);
       if (doc) {
-        clearErased(doc, reimport);
-        if (reimport) doc.rmDocHash = undefined;
+        doc.detachedImported = undefined;
+        // Without `reimport` the records stay, so the erased objects are not
+        // pulled again (like deleting them by hand).
+        if (reimport) {
+          doc.imported = {};
+          doc.rmDocHash = undefined;
+        }
         this.state.set(doc);
       }
     }
@@ -533,12 +520,139 @@ export class SyncEngine {
   }
 }
 
-async function pageTextsOf(att: Zotero.Item): Promise<string[]> {
+/**
+ * Restore word spacing in highlighted text: the tablet copies it straight
+ * from the PDF text layer, which often lacks spaces ("Whenprovided"), so the
+ * same characters are looked up in Zotero's spaced extraction of the page.
+ */
+async function respaceHighlights(att: Zotero.Item, candidates: Candidate[]) {
+  const highlights = candidates.filter(
+    (c): c is AnnotationCandidate => c.kind === "annotation" && !!c.json.text,
+  );
+  if (!highlights.length) return;
+  let pageTexts: string[];
   try {
     const res = await Zotero.PDFWorker.getFullText(att.id, null, true);
-    return splitPageTexts(res?.text, res?.totalPages);
+    pageTexts = splitPageTexts(res?.text, res?.totalPages);
   } catch (e) {
-    Zotero.debug(`[reMarkable] full text unavailable: ${(e as Error).message}`);
-    return [];
+    Zotero.debug(`[reMarkable] full text unavailable: ${errorMessage(e)}`);
+    return;
   }
+  // Built lazily and shared by all highlights on the same page.
+  const indexes = new Map<number, PageIndex>();
+  for (const c of highlights) {
+    const pageIndex = c.json.position.pageIndex;
+    const pageText = pageTexts[pageIndex];
+    let index = indexes.get(pageIndex);
+    if (!index && pageText) {
+      index = buildPageIndex(pageText);
+      indexes.set(pageIndex, index);
+    }
+    c.json.text = respaceWith(c.json.text ?? "", pageText, index);
+  }
+}
+
+/** One report line for the candidates that could not be saved; lists at most three. */
+function formatFailures(failures: string[], total: number): string {
+  const shown = failures.slice(0, 3).join("; ");
+  const more = failures.length > 3 ? `; and ${failures.length - 3} more` : "";
+  return `could not import ${failures.length} of ${total} items (${shown}${more}); will retry on the next sync`;
+}
+
+/**
+ * Whether the tablet copy must be pulled: it changed, the converter changed,
+ * or the previous pull left candidates unsaved.
+ */
+export function needsPull(
+  doc: Pick<DocState, "rmDocHash" | "converterVersion" | "pullIncomplete">,
+  entryHash: string,
+  converterVersion: number,
+): boolean {
+  return (
+    doc.rmDocHash !== entryHash ||
+    doc.converterVersion !== converterVersion ||
+    !!doc.pullIncomplete
+  );
+}
+
+/**
+ * Previously imported records that this pull must erase: only those whose
+ * source is genuinely gone from the tablet. Records are kept when
+ * - the candidate with that rmKey was seen in this pull,
+ * - their page could not be read (its .rm exists but fails to parse), since
+ *   the candidates missing from it say nothing about the content, or
+ * - handwriting import is off, which filters ink (rmKey `<page>/i/…`) and
+ *   notes out of the candidates, so their absence is not an erase.
+ */
+export function keysToErase(
+  imported: Record<string, Pick<ImportedRecord, "kind">>,
+  seen: ReadonlySet<string>,
+  unreadablePageIds: ReadonlySet<string>,
+  importHandwriting: boolean,
+): string[] {
+  const out: string[] = [];
+  for (const [rmKey, rec] of Object.entries(imported)) {
+    const [pageId, kind] = rmKey.split("/");
+    if (seen.has(rmKey) || unreadablePageIds.has(pageId)) continue;
+    if (!importHandwriting && (rec.kind === "note" || kind === "i")) continue;
+    out.push(rmKey);
+  }
+  return out;
+}
+
+/**
+ * The `rmDocHash` to record after we changed the tablet document. `known` is
+ * the hash we last pulled or recorded; `changed.baseHash` is the document
+ * entry our change was merged onto and `changed.hash` the result. Only when
+ * the base is what we knew has the tablet not changed in between, so the new
+ * hash is safe to record. Otherwise (or when nothing is known) undefined makes
+ * the next sync pull first instead of skipping tablet changes that were never
+ * imported.
+ */
+export function nextRmDocHash(
+  known: string | undefined,
+  changed: ChangedDocument,
+): string | undefined {
+  return known !== undefined && known === changed.baseHash
+    ? changed.hash
+    : undefined;
+}
+
+/**
+ * The title to write to the tablet document, or undefined to leave its name
+ * alone. A rename is only pushed when the Zotero title changed since the
+ * last push, so a rename done on the tablet survives PDF rebuilds. Documents
+ * synced before `pushedTitle` was recorded have none: the caller records the
+ * current title without renaming.
+ */
+export function titleToPush(
+  pushedTitle: string | undefined,
+  title: string,
+): string | undefined {
+  return pushedTitle !== undefined && pushedTitle !== title ? title : undefined;
+}
+
+/**
+ * The id of the top-level tablet folder `name` (empty name: the root, which
+ * needs no folder). Finding a folder by name needs every document's metadata,
+ * so the id found last time is cached in the sync state. The root index only
+ * proves that the entry exists: a folder trashed, moved or renamed on the
+ * tablet stays in it, so the cached folder's own metadata (one cheap read) is
+ * checked too before falling back to `ensureFolder`.
+ */
+export async function resolveFolderId(
+  cloud: Pick<RemarkableCloud, "ensureFolder" | "readMetadata">,
+  state: Pick<SyncStateStore, "getFolderId" | "setFolderId">,
+  name: string,
+  rootEntries: ReadonlyMap<string, IndexEntry>,
+): Promise<string> {
+  if (!name) return "";
+  const cached = state.getFolderId(name);
+  const entry = cached === undefined ? undefined : rootEntries.get(cached);
+  if (entry && isTopLevelFolder(await cloud.readMetadata(entry), name)) {
+    return entry.id;
+  }
+  const id = await cloud.ensureFolder(name);
+  state.setFolderId(name, id);
+  return id;
 }

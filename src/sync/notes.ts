@@ -1,46 +1,42 @@
 /**
- * Two-way sync between Zotero child notes and reMarkable note pages.
+ * Zotero note HTML for the notes this plugin writes and reads: the title
+ * convention of notes paired with tablet pages, conversion between note HTML
+ * and tablet paragraphs (paragraphs, headings and bullet lists both ways), and
+ * the embedded drawing image. The pairing rules live in noteSync.ts.
  *
  * Convention: a child note whose title (first line) starts with
- * NOTE_TITLE_PREFIX ("reMarkable Note") is paired with its own page at the
- * end of the document on the tablet. Pages added on the tablet become notes
- * titled "reMarkable Note <n>". The title stays on the Zotero side; the page
- * holds the note body as typed text, so it can be edited on the tablet.
- *
- * Supported formatting both ways: paragraphs, headings and bullet lists.
+ * "reMarkable Note" is paired with its own page at the end of the document on
+ * the tablet. Pages added on the tablet become notes titled
+ * "reMarkable Note <n>". The title stays on the Zotero side; the page holds
+ * the note body as typed text, so it can be edited on the tablet.
  */
 import { ParagraphStyle, type RmParagraph } from "../remarkable/rmscene";
-import type { NotePageRecord } from "./state";
 
-export const NOTE_TITLE_PREFIX = "reMarkable Note";
+const NOTE_TITLE_PREFIX = "reMarkable Note";
 
-export function isSyncedNoteTitle(title: string, prefix = NOTE_TITLE_PREFIX) {
+export function isSyncedNoteTitle(title: string) {
   // Whole words only: "reMarkable notebook" is not "reMarkable Note".
-  return new RegExp(`^${escapeRe(prefix)}(?![\\p{L}])`, "iu").test(
-    title.trim(),
-  );
+  return /^reMarkable Note(?![\p{L}])/iu.test(title.trim());
 }
 
 /** Next free "reMarkable Note <n>" title among existing titles. */
-export function nextNoteTitle(existing: string[], prefix = NOTE_TITLE_PREFIX) {
+export function nextNoteTitle(existing: string[]) {
   const used = new Set(
     existing
-      .map((t) =>
-        new RegExp(`^${escapeRe(prefix)}\\s+(\\d+)`, "i").exec(t.trim()),
-      )
+      .map((t) => /^reMarkable Note\s+(\d+)/i.exec(t.trim()))
       .filter(Boolean)
       .map((m) => Number(m![1])),
   );
   let n = 1;
   while (used.has(n)) n++;
-  return `${prefix} ${n}`;
+  return `${NOTE_TITLE_PREFIX} ${n}`;
 }
 
 function escapeRe(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function decodeEntities(s: string) {
+export function decodeEntities(s: string) {
   return s
     .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
@@ -175,7 +171,7 @@ function trimEmpty(ps: RmParagraph[]) {
   return ps.slice(a, b);
 }
 
-function escapeHtml(s: string) {
+export function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
@@ -300,49 +296,6 @@ export function staleDrawingKeys(
   );
 }
 
-/** Report a failed cleanup without letting the reporter mask the real error. */
-function reportCleanupError(
-  onCleanupError: ((err: unknown) => void) | undefined,
-  err: unknown,
-): void {
-  try {
-    onCleanupError?.(err);
-  } catch {
-    // A broken logger must not replace the error being rethrown.
-  }
-}
-
-/**
- * Replace a note's content with the destructive step last: import the new
- * image, save the note, and only then erase what the note no longer uses. If
- * the import or save fails the new image is erased and the old state stays
- * intact.
- */
-export async function importSaveThenErase<I>(steps: {
-  importImage: () => Promise<I | undefined>;
-  save: (image: I | undefined) => Promise<unknown>;
-  eraseImage: (image: I) => Promise<unknown>;
-  eraseOld: () => Promise<unknown>;
-  /** Told when erasing the new image fails; the save error is still thrown. */
-  onCleanupError?: (err: unknown) => void;
-}): Promise<I | undefined> {
-  const image = await steps.importImage();
-  try {
-    await steps.save(image);
-  } catch (e) {
-    if (image !== undefined) {
-      try {
-        await steps.eraseImage(image);
-      } catch (cleanupErr) {
-        reportCleanupError(steps.onCleanupError, cleanupErr);
-      }
-    }
-    throw e;
-  }
-  await steps.eraseOld();
-  return image;
-}
-
 /**
  * Swap only the plugin's drawing in existing note HTML, leaving everything
  * else the user may have added (links, bold, nested lists, other images)
@@ -382,216 +335,4 @@ export function plainText(body: RmParagraph[]) {
     .map((p) => p.text.replace(/\s+/g, " ").trim())
     .join("\n")
     .trim();
-}
-
-/**
- * Body to write to the tablet. Plain Zotero paragraphs keep the style they
- * already have on the tablet (e.g. a heading set there), matched by text.
- */
-export function withTabletStyles(zotero: RmParagraph[], tablet: RmParagraph[]) {
-  const styleOf = new Map(tablet.map((p) => [p.text.trim(), p.style]));
-  return zotero.map((p) =>
-    p.style === ParagraphStyle.PLAIN && styleOf.has(p.text.trim())
-      ? { ...p, style: styleOf.get(p.text.trim())! }
-      : p,
-  );
-}
-
-export type NoteAction = "none" | "toTablet" | "toZotero" | "conflict";
-
-/** Three-way decision against the text both sides had at the last sync. */
-export function decide(
-  base: string | undefined,
-  zotero: string,
-  tablet: string,
-): NoteAction {
-  if (zotero === tablet) return "none";
-  if (base === undefined) return "conflict";
-  if (tablet === base) return "toTablet";
-  if (zotero === base) return "toZotero";
-  return "conflict";
-}
-
-/**
- * What to do with one existing note/page pair, and the three-way base to
- * record once each half has actually been written. A base is only true after
- * the write it describes, so it is assigned in two stages (see applyPairPlan).
- */
-export interface PairPlan {
-  action: NoteAction;
-  /** Body to write into the Zotero note (toZotero, conflict). */
-  zoteroBody?: RmParagraph[];
-  /** Body to write to the tablet page (toTablet, conflict). */
-  tabletBody?: RmParagraph[];
-  /**
-   * Base that is true once the Zotero half is done: the text the tablet still
-   * holds (toZotero: it was copied over; conflict: Zotero now has the merged
-   * text and the tablet is untouched, so the merged text is simply pushed on
-   * retry instead of being merged again). Undefined keeps the current base.
-   */
-  baseAfterZotero?: string;
-  /** Base that is true once the tablet half is written too. */
-  baseAfterTablet: string;
-}
-
-export function planPair(
-  base: string | undefined,
-  zotero: RmParagraph[],
-  tablet: RmParagraph[],
-): PairPlan {
-  const zPlain = plainText(zotero);
-  const tPlain = plainText(tablet);
-  const action = decide(base, zPlain, tPlain);
-  switch (action) {
-    case "toTablet":
-      return {
-        action,
-        tabletBody: withTabletStyles(zotero, tablet),
-        baseAfterTablet: zPlain,
-      };
-    case "toZotero":
-      return {
-        action,
-        zoteroBody: tablet,
-        baseAfterZotero: tPlain,
-        baseAfterTablet: tPlain,
-      };
-    case "conflict": {
-      const merged = mergeConflict(zotero, tablet);
-      return {
-        action,
-        zoteroBody: merged,
-        tabletBody: merged,
-        baseAfterZotero: tPlain,
-        baseAfterTablet: plainText(merged),
-      };
-    }
-    case "none":
-      return {
-        action,
-        baseAfterZotero: zPlain,
-        baseAfterTablet: zPlain,
-      };
-  }
-}
-
-/**
- * Record changes that only become true after the single tablet write
- * (updateDocument) succeeds: the base of a pair whose page is rewritten, a
- * newly created pairing, a deleted pairing. Nothing is applied if that write
- * throws, so the persisted records always describe what both sides hold.
- */
-export class TabletCommits {
-  private effects: (() => void)[] = [];
-  defer(effect: () => void) {
-    this.effects.push(effect);
-  }
-  commit() {
-    const effects = this.effects;
-    this.effects = [];
-    for (const effect of effects) effect();
-  }
-}
-
-/**
- * After updateDocument threw something other than "the tablet changed": the
- * root PUT is never retried, so the server may have applied it with only the
- * response lost. Given the pages that write added and the pages the document
- * really has now (undefined if it could not be read), return the added pages
- * that exist on the tablet. The write is a single root swap, so any of them
- * means all of it landed and the deferred pairings must be recorded; none
- * means it did not, and nothing is committed.
- */
-export function landedPages(
-  addedPageIds: readonly string[],
-  livePageIds: Iterable<string> | undefined,
-): string[] {
-  if (!livePageIds) return [];
-  const live = new Set(livePageIds);
-  return addedPageIds.filter((id) => live.has(id));
-}
-
-/**
- * Carry out a plan for one pair. `writeZotero` (if any) rewrites the note
- * and records the drawing fields itself; the record is untouched while it
- * throws. The tablet half of the base is deferred to `tabletCommits`.
- */
-export async function applyPairPlan(
-  rec: NotePageRecord,
-  plan: PairPlan,
-  writeZotero: (() => Promise<void>) | undefined,
-  tabletCommits: TabletCommits,
-) {
-  if (writeZotero) await writeZotero();
-  if (plan.baseAfterZotero !== undefined) rec.base = plan.baseAfterZotero;
-  if (plan.tabletBody) {
-    tabletCommits.defer(() => {
-      rec.base = plan.baseAfterTablet;
-    });
-  }
-}
-
-/** Keep both versions when each side changed: Zotero's first, then the tablet's. */
-export function mergeConflict(zotero: RmParagraph[], tablet: RmParagraph[]) {
-  return [
-    ...zotero,
-    {
-      style: ParagraphStyle.HEADING,
-      text: "Edited on reMarkable at the same time:",
-    },
-    ...tablet,
-  ];
-}
-
-export type PairState =
-  /** The tablet page was deleted: drop the pair (and trash the note). */
-  | "pageGone"
-  /** The note is only in Zotero's trash: leave the pair and page untouched. */
-  | "paused"
-  /** The note no longer exists in the library: delete the tablet page. */
-  | "noteGone"
-  /** Both sides exist: sync as usual. */
-  | "active";
-
-/**
- * Decide what to do with a note/page pair. A trashed note is recoverable, so
- * it pauses the pair instead of deleting the page and its handwriting; so is
- * a note that moved to another parent item (`existsElsewhere`: it is still in
- * the library but no longer among the attachment parent's notes). Only a note
- * that is gone from the library takes its page with it.
- */
-export function pairState(
-  pageLive: boolean,
-  noteTrashed: boolean | undefined,
-  existsElsewhere = false,
-): PairState {
-  if (!pageLive) return "pageGone";
-  if (noteTrashed === undefined) return existsElsewhere ? "paused" : "noteGone";
-  return noteTrashed ? "paused" : "active";
-}
-
-/**
- * Run the steps that follow creating a note. When the note was created by this
- * call and a step throws, erase it (best effort) and rethrow the original
- * error; a pre-existing note is never erased. A failed erase leaves an orphan,
- * so it is passed to `onCleanupError` rather than swallowed.
- */
-export async function eraseIfCreatedOnError<T>(
-  created: boolean,
-  erase: () => Promise<unknown>,
-  steps: () => Promise<T>,
-  onCleanupError?: (err: unknown) => void,
-): Promise<T> {
-  try {
-    return await steps();
-  } catch (e) {
-    if (created) {
-      try {
-        await erase();
-      } catch (cleanupErr) {
-        reportCleanupError(onCleanupError, cleanupErr);
-      }
-    }
-    throw e;
-  }
 }
